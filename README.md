@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/logo-blueprint.svg" />
+    <img alt="Ferroprint" src="docs/logo-whiteprint.svg" width="600" />
+  </picture>
+</p>
+
 # Ferroprint
 
 Ferroprint is a blueprint-style sketchpad for system diagrams, flows, interface wireframes and floor plans. It runs in the browser and saves your work in the browser's `localStorage`. No account and no server are necessary.

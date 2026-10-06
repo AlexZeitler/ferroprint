@@ -8,6 +8,7 @@ import { Frame, TopBar, Palette, Inspector, HelpPanel, SetupPanel, LibraryPanel,
 import { DOC_KEY, loadDoc, parseDoc, saveDoc, loadUI, saveUI, storageAvailable } from './storage.js';
 import { shareLink, sharedPayload, readShared, clearShared } from './share.js';
 import { TEMPLATES } from './templates.js';
+import { logoSVG } from './logo.jsx';
 
 const SAVE_DELAY = 400;
 // The space between the window edge and the sheet. Clean mode removes it.
@@ -988,7 +989,7 @@ export default class Editor extends Component {
     o += cell(x, y, 'PROJECT', meta.project, 24) + cell(x + c1, y, 'DWG NO', s.number, 12, true) + cell(x + c2, y, 'REV', meta.rev, 12, true);
     o += cell(x, y + r, 'TITLE', s.name, 24) + cell(x + c1, y + r, 'SCALE', F.scaleLabel(s.unit, this.g()), 14, true) + cell(x + c2, y + r, 'SHEET', `${idx + 1} OF ${d.sheets.length}`, 12, true);
     o += cell(x, y + 2 * r, 'DRAWN BY', meta.drawnBy, 11) + cell(x + 95, y + 2 * r, 'DATE', meta.date, 12, true);
-    o += `<text x="${x + c1 + (w - c1) / 2}" y="${y + 2 * r + r / 2 + 5}" text-anchor="middle" font-family="Barlow Condensed, sans-serif" font-weight="600" font-size="14" letter-spacing="3" fill="${t.ink}">FERROPRINT</text></g>`;
+    o += logoSVG(x + c1 + (w - c1) / 2, y + 2 * r + r / 2, 12, t.ink, t.accent) + '</g>';
     return o;
   }
   async buildSVG() {
@@ -1257,7 +1258,7 @@ export default class Editor extends Component {
           clean={st.clean} onClean={() => this.toggleClean()}
         />
 
-        {!st.clean && <Inspector
+        {(!st.clean || st.sel.length > 0) && <Inspector
           nodes={s.nodes.filter(n => ids.has(n.id))} edges={s.edges.filter(e => ids.has(e.id))} nodeById={map}
           fmt={px => F.fmtLen(px, s.unit, g)}
           setNode={(id, patch, key) => { this.pushHistory(key); this.setNodes(a => a.map(q => (q.id === id ? { ...q, ...patch } : q))); }}

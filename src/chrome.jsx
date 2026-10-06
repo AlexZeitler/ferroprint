@@ -5,6 +5,7 @@ import { renderNode, renderEdge } from './draw.jsx';
 import { TEMPLATES } from './templates.js';
 import { ICONS, PALETTE, LIBRARY_ICON, PIN_ICON } from './icons.jsx';
 import { CATEGORIES, ToolIcon } from './library.jsx';
+import { Mark, Wordmark } from './logo.jsx';
 import { PROVIDERS, PROVIDER_NAME, FRAMES, loadCloud, onCloudLoad, cloudSet, cloudFailed } from './cloud.js';
 
 const IS_MAC = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
@@ -102,8 +103,8 @@ export function TopBar({ barRef, save, canUndo, canRedo, snap, dims, mode, panel
   return (
     <div className="topbar" ref={barRef}>
       <div className="group brand" title={saveTitle}>
-        <div className="mark"><div /></div>
-        <h1>FERROPRINT</h1>
+        <Mark size={28} />
+        <h1><Wordmark size={15} /></h1>
         <span className={cx('save-state', (save === 'error' || save === 'off') && 'warn')} role="status">{saveText}</span>
       </div>
       <div className="group">
@@ -586,7 +587,7 @@ export function TitleBlock({ wide, tb }) {
       </div>
       {field('drawn br', 'DRAWN BY', tb.drawn, tb.setDrawn, 'Initials')}
       {field('mono small br', 'DATE', tb.date, tb.setDate)}
-      <div className="cell span2 maker"><div className="mark small"><div /></div><span>FERROPRINT</span></div>
+      <div className="cell span2 maker"><Mark size={24} /><Wordmark size={14} /></div>
     </div>
   );
 }

@@ -175,18 +175,11 @@ textarea:focus-visible {
   border: 1px solid var(--ink);
   box-shadow: var(--shadow);
 }
-.mark {
-  width: 14px;
-  height: 14px;
-  border: 1.5px solid var(--ink);
-  display: flex;
-  align-items: center;
-  justify-content: center;
+.logo-mark,
+.logo-word {
+  display: block;
   flex: none;
 }
-.mark > div { width: 6px; height: 6px; background: var(--ink); }
-.mark.small { width: 12px; height: 12px; }
-.mark.small > div { width: 5px; height: 5px; }
 
 /* ---------- top bar */
 .topbar {
@@ -207,15 +200,10 @@ textarea:focus-visible {
 }
 .brand {
   align-items: center;
-  gap: 10px;
-  padding: 0 12px 0 14px;
+  gap: 8px;
+  padding: 0 12px 0 8px;
 }
-.brand h1 {
-  margin: 0;
-  font-size: 17px;
-  font-weight: 700;
-  letter-spacing: 0.24em;
-}
+.brand h1 { margin: 0 6px 0 0; }
 .save-state {
   width: 62px;
   font-family: var(--mono);
@@ -808,13 +796,8 @@ button.cell:hover { background: var(--hover); }
   flex-direction: row;
   align-items: center;
   justify-content: center;
-  gap: 10px;
-  padding: 6px 8px;
-}
-.cell.maker span {
-  font-size: 15px;
-  font-weight: 700;
-  letter-spacing: 0.26em;
+  gap: 7px;
+  padding: 4px 8px;
 }
 .title-block.narrow {
   display: flex;
@@ -979,6 +962,18 @@ button.cell:hover { background: var(--hover); }
   max-height: calc(100% - 32px);
 }
 .app.clean .toast { top: 16px; }
+/* A selection opens the inspector in clean mode too, so labels and styles stay editable. */
+.app.clean .inspector {
+  top: 16px;
+  right: 16px;
+  max-height: calc(100% - 32px);
+}
+.app.tiny.clean .inspector {
+  top: auto;
+  left: 16px;
+  right: 16px;
+  bottom: 16px;
+}
 .clean-exit {
   flex: none;
   height: 26px;
