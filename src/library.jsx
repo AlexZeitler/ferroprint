@@ -1,3 +1,5 @@
+import { cloudIcon, isCloudKey } from './cloud.js';
+
 // Symbol library: floor plan, furniture, system, flow and interface symbols.
 // Each symbol draws itself in a local w × h box with a "pen". The editor rotates and mirrors that box.
 // Sizes follow the drafting grid: on a sheet in feet, 20 px is 1 ft.
@@ -491,4 +493,30 @@ export function SymbolIcon({ id, size = 40, t }) {
       {s.draw(s.w, s.h, makePen(t, 'none', undefined, true))}
     </svg>
   );
+}
+
+// Draws a converted cloud icon. Modes: f = ink fill, l = light fill, s = source stroke, o = outline.
+// `sw` is the outline width in icon units, so the outline keeps the weight of the other symbols.
+export function cloudPaths(ic, t, sw, icon) {
+  const ink = icon ? 'currentColor' : t.ink, ve = icon ? 'non-scaling-stroke' : undefined;
+  return ic.p.map(([m, d, tr, e, w], i) => {
+    const transform = tr || undefined, fillRule = e ? 'evenodd' : undefined;
+    if (m === 'f') return <path key={i} d={d} transform={transform} fillRule={fillRule} fill={ink} />;
+    if (m === 'l') return <path key={i} d={d} transform={transform} fillRule={fillRule} fill={ink} fillOpacity={0.42} />;
+    if (m === 's') return <path key={i} d={d} transform={transform} fill="none" stroke={ink} strokeWidth={w || 1} />;
+    return <path key={i} d={d} transform={transform} fill="none" stroke={ink} strokeWidth={icon ? 1 : sw} strokeLinejoin="round" vectorEffect={ve} />;
+  });
+}
+
+export function CloudIcon({ k, size = 40, t }) {
+  const ic = cloudIcon(k);
+  if (!ic) return <svg width={size} height={size} viewBox="0 0 10 10" aria-hidden="true"><rect x="1" y="1" width="8" height="8" fill="none" stroke="currentColor" strokeOpacity={0.4} strokeDasharray="1.5 1" vectorEffect="non-scaling-stroke" /></svg>;
+  const [x, y, w, h] = ic.v;
+  return <svg width={size} height={size} viewBox={`${x} ${y} ${w} ${h}`} aria-hidden="true">{cloudPaths(ic, t, 1, true)}</svg>;
+}
+
+// The icon of any tool that places a library shape: a symbol or a cloud icon ("cloud:aws/amazon-ec2").
+export function ToolIcon({ id, size, t }) {
+  if (id.startsWith('cloud:') && isCloudKey(id.slice(6))) return <CloudIcon k={id.slice(6)} size={size} t={t} />;
+  return <SymbolIcon id={id} size={size} t={t} />;
 }

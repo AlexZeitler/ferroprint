@@ -3,13 +3,17 @@ import { flushSync } from 'react-dom';
 import * as F from './engine.js';
 import { renderNode, renderEdge, renderDims } from './draw.jsx';
 import { SYMBOLS } from './library.jsx';
+import { loadCloud, onCloudLoad, cloudProvider, cloudSet, cloudFailed, isCloudKey } from './cloud.js';
 import { Frame, TopBar, Palette, Inspector, HelpPanel, SetupPanel, LibraryPanel, TitleBlock, StatusBar, Toast } from './chrome.jsx';
 import { DOC_KEY, loadDoc, parseDoc, saveDoc, loadUI, saveUI, storageAvailable } from './storage.js';
 
 const SAVE_DELAY = 400;
 const HISTORY_LIMIT = 150;
 const RECENT_MAX = 3;
+const PIN_MAX = 24;
 const PALETTE_TOOLS = new Set(['door']);
+// A tool that places a library shape: a symbol or a cloud icon.
+const isLibraryTool = id => typeof id === 'string' && (!!SYMBOLS[id] || (id.startsWith('cloud:') && isCloudKey(id.slice(6))));
 
 function textureFor(mode) {
   const [r, g, b] = F.THEMES[mode].tex;
@@ -26,7 +30,8 @@ export default class Editor extends Component {
       doc: stored ? stored.doc : F.exampleDoc(),
       tool: 'select', sel: [], hover: null, editing: null, marquee: null, guides: [], temp: null, draft: null,
       snap: ui.snap !== false, dims: ui.dims !== false, mode: ui.mode === 'white' ? 'white' : 'blue',
-      recent: Array.isArray(ui.recent) ? ui.recent.filter(id => SYMBOLS[id]).slice(0, RECENT_MAX) : ['stairs', 'sofa', 'cloud'], ghost: null,
+      recent: Array.isArray(ui.recent) ? ui.recent.filter(isLibraryTool).slice(0, RECENT_MAX) : ['stairs', 'sofa', 'cloud'],
+      pins: Array.isArray(ui.pins) ? ui.pins.filter(isLibraryTool).slice(0, PIN_MAX) : [], ghost: null,
       size: { w: 0, h: 0 }, cursor: { x: 0, y: 0 }, space: false, panning: false,
       panel: null, toast: null, delArm: false, palTop: 92,
       win: { w: window.innerWidth, h: window.innerHeight },
@@ -37,10 +42,12 @@ export default class Editor extends Component {
     this.drag = null; this.clip = null; this.pasteN = 0;
     this.pointers = new Map();
     this.fontCache = {}; this.fontGen = 0;
-    this.nodeCache = new WeakMap(); this.edgeCache = new WeakMap();
+    this.nodeCache = new WeakMap(); this.edgeCache = new WeakMap(); this.cloudGen = 0;
     this.barRef = createRef(); this.fileRef = createRef();
     this.canvasEl = null; this.contentEl = null;
     ['onDown', 'onMove', 'onUp', 'onDbl', 'onWheel', 'onKey', 'onKeyUp', 'onResize', 'setCanvas', 'setContent', 'onFile', 'onBlurWin', 'onStorage', 'onHide'].forEach(k => { this[k] = this[k].bind(this); });
+    // Stable handlers let the library panel skip renders while the pointer moves.
+    this.lib = { pick: id => this.pickSymbol(id), pin: id => this.togglePin(id), drag: (id, e) => this.startPlace(id, e), close: () => this.setState({ panel: null }) };
   }
 
   componentDidMount() {
@@ -54,6 +61,8 @@ export default class Editor extends Component {
     window.addEventListener('storage', this.onStorage);
     window.addEventListener('pagehide', this.onHide);
     document.addEventListener('visibilitychange', this.onHide);
+    // A cloud set arrives after the first render, so the sheet draws again when one loads.
+    this.offCloud = onCloudLoad(() => { this.cloudGen++; this.forceUpdate(); });
     this.persist();
     if (document.fonts) {
       // Labels are measured on a canvas, so redraw once the drafting fonts are ready.
@@ -72,6 +81,7 @@ export default class Editor extends Component {
     window.removeEventListener('storage', this.onStorage);
     window.removeEventListener('pagehide', this.onHide);
     document.removeEventListener('visibilitychange', this.onHide);
+    if (this.offCloud) this.offCloud();
     if (this._saveT) this.flushSave();
     [this._toastT, this._armT].forEach(clearTimeout);
   }
@@ -82,14 +92,25 @@ export default class Editor extends Component {
     const st = this.state;
     if (this._mode !== st.mode) { this._mode = st.mode; this.applyTheme(); }
     if (this._doc !== st.doc) { this._doc = st.doc; this.scheduleSave(); }
-    const prefs = { snap: st.snap, dims: st.dims, mode: st.mode, recent: st.recent }, ui = JSON.stringify(prefs);
+    const prefs = { snap: st.snap, dims: st.dims, mode: st.mode, recent: st.recent, pins: st.pins }, ui = JSON.stringify(prefs);
     if (ui !== this._ui) { this._ui = ui; saveUI(prefs); }
+    this.ensureClouds();
     if (!this.sheet().view && this.canvasEl && this.canvasEl.getBoundingClientRect().width > 0) this.fit();
     const bar = this.barRef.current;
     if (bar) {
       const h = bar.offsetHeight;
       if (h && h !== this._topH) { this._topH = h; this.setState({ palTop: 40 + h + 12 }); }
     }
+  }
+  // Loads the cloud sets that the active sheet, the pins and the recent list use.
+  cloudsInUse(nodes) {
+    const need = new Set();
+    nodes.forEach(n => { if (n.type === 'cloud') need.add(cloudProvider(n.icon)); });
+    [...this.state.pins, ...this.state.recent].forEach(id => { if (id.startsWith('cloud:')) need.add(cloudProvider(id.slice(6))); });
+    return [...need];
+  }
+  ensureClouds() {
+    this.cloudsInUse(this.sheet().nodes).forEach(p => { if (!cloudSet(p) && !cloudFailed(p)) loadCloud(p).catch(() => {}); });
   }
   scheduleSave() {
     if (this.state.save === 'off') return;
@@ -258,7 +279,7 @@ export default class Editor extends Component {
     const { tool, space } = this.state;
     try { this.canvasEl.setPointerCapture(e.pointerId); } catch { /* the pointer is already gone */ }
     if (e.button === 1 || tool === 'hand' || space) { e.preventDefault(); this.drag = { type: 'pan', cx: e.clientX, cy: e.clientY, v0: this.view() }; this.setState({ panning: true }); return; }
-    if (F.SHAPES[tool]) { this.drag = { type: 'create', shape: tool, start: p }; return; }
+    if (F.toolShape(tool)) { this.drag = { type: 'create', shape: tool, start: p }; return; }
     if (tool === 'pen') { this.drag = { type: 'pen', pts: [p] }; this.setState({ sel: [] }); return; }
     if (tool === 'line') { this.drag = { type: 'line', start: { x: this.sn(p.x), y: this.sn(p.y) } }; this.setState({ sel: [] }); return; }
     if (kind === 'port' || tool === 'connector') {
@@ -603,11 +624,17 @@ export default class Editor extends Component {
   }
   setTool(id) { this.setState({ tool: id, temp: null, hover: null }); }
   // The default box of a shape, centered on a point and snapped to the grid.
-  placeRect(shape, p) { const sz = F.SHAPES[shape]; return { x: this.sn(p.x - sz.w / 2), y: this.sn(p.y - sz.h / 2), w: sz.w, h: sz.h }; }
+  placeRect(shape, p) { const sz = F.toolShape(shape); return { x: this.sn(p.x - sz.w / 2), y: this.sn(p.y - sz.h / 2), w: sz.w, h: sz.h }; }
   // The palette keeps the last library symbols at hand. Symbols that the palette always shows stay out of the list.
   withRecent(id) {
     const r = this.state.recent;
-    return !SYMBOLS[id] || PALETTE_TOOLS.has(id) ? r : [id, ...r.filter(x => x !== id)].slice(0, RECENT_MAX);
+    return !isLibraryTool(id) || PALETTE_TOOLS.has(id) ? r : [id, ...r.filter(x => x !== id)].slice(0, RECENT_MAX);
+  }
+  togglePin(id) {
+    const pins = this.state.pins;
+    if (pins.includes(id)) this.setState({ pins: pins.filter(x => x !== id) });
+    else if (pins.length >= PIN_MAX) this.flash(`The toolbar holds ${PIN_MAX} pinned shapes. Unpin one first.`, 4000);
+    else this.setState({ pins: [...pins, id] });
   }
   pickSymbol(id) {
     this.setState(st => ({ tool: id, temp: null, hover: null, recent: this.withRecent(id), panel: st.win.w < 640 ? null : st.panel }));
@@ -790,6 +817,7 @@ export default class Editor extends Component {
     if (this._busy) return;
     this._busy = true;
     const sel = this.state.sel;
+    await Promise.all(this.cloudsInUse(this.sheet().nodes).map(p => loadCloud(p).catch(() => null)));
     this.setState({ toast: { msg: `Exporting ${kind.toUpperCase()}…` } });
     clearTimeout(this._toastT);
     try {
@@ -931,7 +959,7 @@ export default class Editor extends Component {
     const map = this.nodeMap(s), selSet = new Set(st.sel);
     const zones = s.nodes.filter(n => n.type === 'zone'), rest = s.nodes.filter(n => n.type !== 'zone');
     const ptf = `translate(${v.x} ${v.y}) scale(${k})`;
-    const key = `${st.mode}|${ctx.L.css}|${ctx.caps}|${s.unit}|${g}|${this.fontGen}`;
+    const key = `${st.mode}|${ctx.L.css}|${ctx.caps}|${s.unit}|${g}|${this.fontGen}|${this.cloudGen}`;
     const panTool = st.tool === 'hand' || st.space;
     const cursor = panTool ? (st.panning ? 'grabbing' : 'grab') : st.tool === 'select' ? 'default' : 'crosshair';
     return (
@@ -999,7 +1027,7 @@ export default class Editor extends Component {
           }}
         />
         <Palette
-          tool={st.tool} onTool={id => this.setTool(id)} recent={st.recent} theme={t}
+          tool={st.tool} onTool={id => this.setTool(id)} recent={st.recent} pins={st.pins} onUnpin={id => this.togglePin(id)} theme={t}
           libraryOpen={st.panel === 'library'} onLibrary={() => this.togglePanel('library')} onSymbol={id => this.pickSymbol(id)}
         />
 
@@ -1019,8 +1047,7 @@ export default class Editor extends Component {
         {st.panel === 'help' && <HelpPanel onClose={() => this.setState({ panel: null })} />}
         {st.panel === 'library' && (
           <LibraryPanel
-            tool={st.tool} theme={t} onPick={id => this.pickSymbol(id)} onDragStart={(id, e) => this.startPlace(id, e)}
-            onClose={() => this.setState({ panel: null })}
+            tool={st.tool} theme={t} pins={st.pins} onPin={this.lib.pin} onPick={this.lib.pick} onDragStart={this.lib.drag} onClose={this.lib.close}
           />
         )}
         {st.panel === 'setup' && <SetupPanel settings={d.settings} onSet={patch => this.setSettings(patch)} onClose={() => this.setState({ panel: null })} />}
@@ -1042,7 +1069,7 @@ export default class Editor extends Component {
 
         <StatusBar
           right={wide ? 500 : tiny ? 40 : 280} cursor={st.cursor} zoomPct={Math.round(v.k * 100) + '%'}
-          tool={(F.TOOL_NAMES[tool] || tool).toUpperCase() + (F.KEY_OF[tool] ? ` · ${F.KEY_OF[tool]}` : '')}
+          tool={F.toolName(tool).toUpperCase() + (F.KEY_OF[tool] ? ` · ${F.KEY_OF[tool]}` : '')}
           hint={F.HINTS[tool] || (F.TURN[tool] ? 'Click to place · drag to size · ⇧R rotates' : 'Click to place · drag to size')}
           tabs={d.sheets.map(q => ({ id: q.id, num: q.number, name: q.name || 'Untitled', full: `${q.number} ${q.name || ''}`, active: q.id === s.id, on: () => this.switchSheet(q.id) }))}
           delLabel={st.delArm ? 'CONFIRM DELETE' : 'DELETE SHEET'}

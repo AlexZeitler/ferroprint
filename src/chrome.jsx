@@ -1,8 +1,9 @@
 // Editor chrome: the sheet frame, toolbars, inspector, panels, title block and status bar.
-import { useMemo, useRef, useState } from 'react';
-import { TYPE_NAME, TOOL_NAMES, KEY_OF, LABELLESS, NOFILL, TURN, trunc } from './engine.js';
-import { ICONS, PALETTE, LIBRARY_ICON } from './icons.jsx';
-import { CATEGORIES, SymbolIcon } from './library.jsx';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
+import { TYPE_NAME, TOOL_NAMES, KEY_OF, LABELLESS, NOFILL, NOLINE, TURN, trunc, toolName, nodeTitle, nodeMeta } from './engine.js';
+import { ICONS, PALETTE, LIBRARY_ICON, PIN_ICON } from './icons.jsx';
+import { CATEGORIES, ToolIcon } from './library.jsx';
+import { PROVIDERS, PROVIDER_NAME, loadCloud, onCloudLoad, cloudSet, cloudFailed } from './cloud.js';
 
 const IS_MAC = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 export const MOD = IS_MAC ? '⌘' : 'Ctrl ';
@@ -120,7 +121,7 @@ export function TopBar({ barRef, save, canUndo, canRedo, snap, dims, mode, panel
   );
 }
 
-export function Palette({ tool, onTool, recent, theme, libraryOpen, onLibrary, onSymbol }) {
+export function Palette({ tool, onTool, recent, pins, onUnpin, theme, libraryOpen, onLibrary, onSymbol }) {
   const group = g => (
     <div key={g.label}>
       <div className="caption">{g.label.toUpperCase()}</div>
@@ -137,18 +138,25 @@ export function Palette({ tool, onTool, recent, theme, libraryOpen, onLibrary, o
     </div>
   );
   // The library sits under the draw tools, so it stays in view on short screens.
+  // Pinned shapes come first. The recent shapes follow, without the pinned ones.
+  const libTool = (id, pinned) => (
+    <button
+      type="button" key={id} className={cx('tool', tool === id && 'on')} aria-pressed={tool === id} aria-label={toolName(id)}
+      title={pinned ? `${toolName(id)} · right-click to unpin` : toolName(id)}
+      onClick={() => onSymbol(id)} onContextMenu={pinned ? e => { e.preventDefault(); onUnpin(id); } : undefined}
+    >
+      <ToolIcon id={id} size={22} t={theme} />
+    </button>
+  );
   const library = (
     <div key="library">
       <div className="caption">LIBRARY</div>
       <div className="tools">
-        <button type="button" className={cx('tool', libraryOpen && 'on')} aria-pressed={libraryOpen} aria-label="Library" title="Library of doors, furniture and more · /" onClick={onLibrary}>
+        <button type="button" className={cx('tool', libraryOpen && 'on')} aria-pressed={libraryOpen} aria-label="Library" title="Library: doors, furniture, cloud icons and more · /" onClick={onLibrary}>
           {LIBRARY_ICON}
         </button>
-        {recent.map(id => (
-          <button type="button" key={id} className={cx('tool', tool === id && 'on')} aria-pressed={tool === id} aria-label={TOOL_NAMES[id]} title={TOOL_NAMES[id]} onClick={() => onSymbol(id)}>
-            <SymbolIcon id={id} size={22} t={theme} />
-          </button>
-        ))}
+        {pins.map(id => libTool(id, true))}
+        {recent.filter(id => !pins.includes(id)).map(id => libTool(id, false))}
       </div>
     </div>
   );
@@ -161,61 +169,124 @@ export function Palette({ tool, onTool, recent, theme, libraryOpen, onLibrary, o
   );
 }
 
-const ALL = 'all';
+const CLOUD_SEARCH_MAX = 48;
+let lastView = 'all';
 
-export function LibraryPanel({ tool, theme, onPick, onDragStart, onClose }) {
+// One list of shapes for the panel. Each item is a tool id and a name.
+// A word that starts with the query ranks above a match inside a word.
+function librarySections(view, q, pins) {
+  const score = (...words) => {
+    if (!q) return 1;
+    const text = words.join(' ').toLowerCase();
+    if (!text.includes(q)) return 0;
+    return (' ' + text).replace(/[^a-z0-9]+/g, ' ').includes(' ' + q.replace(/[^a-z0-9]+/g, ' ').trim()) ? 2 : 1;
+  };
+  const ranked = list => list.map((it, i) => ({ ...it, i })).filter(it => it.s > 0).sort((a, b) => b.s - a.s || a.i - b.i);
+  if (view === 'pinned') return [{ key: 'pinned', title: 'Pinned', items: ranked(pins.map(id => ({ id, name: toolName(id), s: score(toolName(id)) }))) }];
+  const base = CATEGORIES.filter(c => view === 'all' || c.id === view).map(c => ({
+    key: c.id, title: c.name, items: ranked(c.items.map(sym => ({ id: sym.id, name: sym.name, s: score(sym.name, sym.keys || '', c.name) })))
+  }));
+  const cloud = PROVIDERS.filter(p => view === p.id || (view === 'all' && q.length >= 2)).flatMap(p => {
+    const set = cloudSet(p.id);
+    if (!set) return [];
+    const item = (k, g) => ({ id: `cloud:${p.id}/${k}`, name: set.icons[k].n, s: score(set.icons[k].n, g.n, view === 'all' ? p.name : '') });
+    if (view === 'all') {
+      const seen = new Set(), all = ranked(set.groups.flatMap(g => g.i.filter(k => !seen.has(k) && seen.add(k)).map(k => item(k, g))));
+      const more = all.length > CLOUD_SEARCH_MAX ? ` · first ${CLOUD_SEARCH_MAX} of ${all.length}, open ${p.name} for all` : '';
+      return [{ key: p.id, title: p.name + more, items: all.slice(0, CLOUD_SEARCH_MAX) }];
+    }
+    return set.groups.map(g => ({ key: p.id + g.n, title: g.n, items: ranked(g.i.map(k => item(k, g))) }));
+  });
+  return [...base, ...cloud].filter(sec => sec.items.length);
+}
+
+// The panel can hold hundreds of tiles, so it renders only when its own props change.
+export const LibraryPanel = memo(function LibraryPanel({ tool, theme, pins, onPin, onPick, onDragStart, onClose }) {
   const [query, setQuery] = useState('');
-  const [cat, setCat] = useState(ALL);
+  const [view, setViewState] = useState(lastView);
+  const [, setGen] = useState(0);
+  const setView = v => { lastView = v; setViewState(v); };
   const coarse = useMemo(() => typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(pointer: coarse)').matches, []);
   const q = query.trim().toLowerCase();
-  const groups = CATEGORIES
-    .filter(c => cat === ALL || c.id === cat)
-    .map(c => ({ ...c, items: c.items.filter(s => !q || `${s.name} ${s.keys || ''} ${c.name}`.toLowerCase().includes(q)) }))
-    .filter(c => c.items.length);
-  const first = groups.length ? groups[0].items[0] : null;
+  const searchAll = view === 'all' && q.length >= 2;
+  useEffect(() => onCloudLoad(() => setGen(g => g + 1)), []);
+  // A cloud set loads when its view opens, or when a search in All needs it.
+  useEffect(() => {
+    const ids = PROVIDER_NAME[view] ? [view] : searchAll ? PROVIDERS.map(p => p.id) : view === 'pinned' ? pins.filter(id => id.startsWith('cloud:')).map(id => id.slice(6).split('/')[0]) : [];
+    ids.forEach(id => loadCloud(id).catch(() => {}));
+  }, [view, searchAll, pins]);
+  const sections = librarySections(view, q, pins);
+  const first = sections.length ? sections[0].items[0] : null;
+  const provider = PROVIDER_NAME[view];
+  const loading = provider ? !cloudSet(view) && !cloudFailed(view) : searchAll && PROVIDERS.some(p => !cloudSet(p.id) && !cloudFailed(p.id));
   const onKeyDown = e => {
     if (e.key === 'Escape') { e.stopPropagation(); if (query) setQuery(''); else onClose(); }
     else if (e.key === 'Enter' && first) { e.preventDefault(); onPick(first.id); }
   };
+  const nav = [['pinned', 'Pinned', pins.length], ['all', 'All'], ...CATEGORIES.map(c => [c.id, c.name, c.items.length])];
+  const navBtn = ([id, name, count]) => (
+    <button type="button" key={id} className={cx(view === id && 'on')} aria-pressed={view === id} onClick={() => setView(id)}>
+      <span>{name}</span>{count != null && <span className="count">{count}</span>}
+    </button>
+  );
   return (
     <aside className="panel float library" aria-label="Library">
       <header><h2>LIBRARY</h2><button type="button" className="close" onClick={onClose}>CLOSE</button></header>
       <div className="lib-head">
-        <input className="field" type="search" value={query} placeholder="Find a shape: door, bed, server…" aria-label="Find a shape" autoFocus={!coarse} spellCheck={false} onChange={e => setQuery(e.target.value)} onKeyDown={onKeyDown} />
-        <div className="seg" role="group" aria-label="Category">
-          {[[ALL, 'All'], ...CATEGORIES.map(c => [c.id, c.name])].map(([id, name]) => (
-            <button type="button" key={id} className={cx(cat === id && 'on')} aria-pressed={cat === id} onClick={() => setCat(id)}>{name}</button>
-          ))}
-        </div>
+        <input className="field" type="search" value={query} placeholder="Find a shape: door, bed, lambda, bigquery…" aria-label="Find a shape" autoFocus={!coarse} spellCheck={false} onChange={e => setQuery(e.target.value)} onKeyDown={onKeyDown} />
       </div>
-      <div className="lib-body">
-        {groups.map(c => (
-          <section key={c.id}>
-            <div className="caption">{c.name.toUpperCase()}</div>
-            <div className="tiles">
-              {c.items.map(sym => (
-                <button
-                  type="button" key={sym.id} className={cx('tile', tool === sym.id && 'on')} aria-pressed={tool === sym.id} title={`${sym.name}: click, then place it on the sheet, or drag it onto the sheet`}
-                  onClick={() => onPick(sym.id)}
-                  onPointerDown={e => { if (e.pointerType === 'mouse' && e.button === 0) onDragStart(sym.id, e); }}
-                >
-                  <SymbolIcon id={sym.id} size={40} t={theme} />
-                  <span>{sym.name}</span>
-                </button>
-              ))}
-            </div>
-          </section>
-        ))}
-        {!groups.length && <p className="hint">No shape matches “{query}”. Try a different word, or choose All.</p>}
+      <div className="lib-main">
+        <nav className="lib-nav" aria-label="Library groups">
+          <div className="caption">SHAPES</div>
+          {nav.map(navBtn)}
+          <div className="caption">CLOUD</div>
+          {PROVIDERS.map(p => navBtn([p.id, p.name, cloudSet(p.id) ? Object.keys(cloudSet(p.id).icons).length : null]))}
+        </nav>
+        <div className="lib-body">
+          {sections.map(sec => (
+            <section key={sec.key} className="lib-section">
+              <div className="caption">{sec.title.toUpperCase()}</div>
+              <div className="tiles">
+                {sec.items.map(it => {
+                  const pinned = pins.includes(it.id);
+                  return (
+                    <div className="tile-wrap" key={it.id}>
+                      <button
+                        type="button" className={cx('tile', tool === it.id && 'on')} aria-pressed={tool === it.id} title={`${it.name}: click, then place it on the sheet, or drag it onto the sheet`}
+                        onClick={() => onPick(it.id)}
+                        onPointerDown={e => { if (e.pointerType === 'mouse' && e.button === 0) onDragStart(it.id, e); }}
+                      >
+                        <ToolIcon id={it.id} size={40} t={theme} />
+                        <span>{it.name}</span>
+                      </button>
+                      <button type="button" className={cx('pin', pinned && 'on')} aria-pressed={pinned} aria-label={pinned ? `Unpin ${it.name}` : `Pin ${it.name} to the toolbar`} title={pinned ? 'Unpin from the toolbar' : 'Pin to the toolbar'} onClick={() => onPin(it.id)}>
+                        {PIN_ICON}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+          ))}
+          {loading && <p className="hint">Loading {provider || 'cloud'} icons…</p>}
+          {provider && cloudFailed(view) && (
+            <p className="hint">Could not load the {provider} icons. Check the connection, then <button type="button" className="link" onClick={() => loadCloud(view).catch(() => {})}>try again</button>.</p>
+          )}
+          {!sections.length && !loading && !(provider && cloudFailed(view)) && (
+            <p className="hint">
+              {view === 'pinned' && !q ? 'Nothing is pinned yet. Use the pin on a shape to keep it in the toolbar.' : `No shape matches “${query}”. Try a different word, or choose All.`}
+            </p>
+          )}
+        </div>
       </div>
       <p className="hint lib-foot">
         {coarse
-          ? 'Tap a shape, then tap or drag on the sheet. To turn a door or furniture, select it and use ROTATE in the inspector.'
-          : 'Click a shape, then click or drag on the sheet. You can also drag a shape onto the sheet. Doors and furniture rotate with ⇧R and flip with ⇧H.'}
+          ? 'Tap a shape, then tap or drag on the sheet. The pin keeps a shape in the toolbar.'
+          : 'Click a shape, then click or drag on the sheet, or drag it onto the sheet. The pin keeps a shape in the toolbar. Doors and furniture rotate with ⇧R.'}
       </p>
     </aside>
   );
-}
+});
 
 const SOLID = [[false, 'Solid'], [true, 'Dashed']];
 
@@ -225,7 +296,7 @@ export function Inspector({ nodes, edges, nodeById, fmt, setNode, setEdge, act }
     const set = (patch, key) => setNode(id, patch, key);
     return (
       <aside className="panel inspector" aria-label="Inspector">
-        <header><h2>{TYPE_NAME[n.type] || n.type}</h2><span>{fmt(n.w)} × {fmt(n.h)}</span></header>
+        <header><h2 title={nodeTitle(n)}>{nodeTitle(n)}</h2><span>{nodeMeta(n) || `${fmt(n.w)} × ${fmt(n.h)}`}</span></header>
         {!LABELLESS[n.type] && (
           <section>
             <div className="caption">LABEL</div>
@@ -243,7 +314,7 @@ export function Inspector({ nodes, edges, nodeById, fmt, setNode, setEdge, act }
           </div>
         </section>
         <section>
-          <Seg label="LINE" opts={SOLID} value={!!n.dashed} onChange={v => set({ dashed: v })} />
+          {!NOLINE[n.type] && <Seg label="LINE" opts={SOLID} value={!!n.dashed} onChange={v => set({ dashed: v })} />}
           {!NOFILL[n.type] && <Seg label="FILL" opts={[['none', 'None'], ['tint', 'Tint'], ['hatch', 'Hatch']]} value={n.fill || 'none'} onChange={v => set({ fill: v })} />}
           {!LABELLESS[n.type] && <Seg label="TEXT" opts={[['s', 'S'], ['m', 'M'], ['l', 'L']]} value={n.size || 'm'} onChange={v => set({ size: v })} />}
           {(n.type === 'path' || n.type === 'line') && <Seg label="WEIGHT" opts={[['s', 'Fine'], ['m', 'Medium'], ['l', 'Wall']]} value={n.weight || 'm'} onChange={v => set({ weight: v })} />}
@@ -318,7 +389,7 @@ const KEYMAP = [
   ['Double-click', 'Edit label · new text'], ['Esc', 'Cancel · clear selection'],
   [`${MOD}Z · ${MOD}${KSHIFT}Z`, 'Undo · redo'], [`${MOD}C · X · V`, 'Copy · cut · paste'],
   [`${MOD}D`, 'Duplicate'], [`${MOD}A`, 'Select all'], [`${MOD}G`, 'Wrap selection in zone'],
-  ['/', 'Library: doors, furniture and more'], [`${KSHIFT}R · ${KSHIFT}H`, 'Rotate · flip doors and furniture'],
+  ['/', 'Library: shapes and cloud icons'], [`${KSHIFT}R · ${KSHIFT}H`, 'Rotate · flip doors and furniture'],
   [`${MOD}S`, 'Save now'], [`${MOD}O`, 'Open a JSON file'], ['?', 'Show this list'],
   ['Delete', 'Remove selection'], ['Arrows', 'Nudge · shift = one square'], ['Scroll', 'Pan'],
   [`${MOD}Scroll · + −`, 'Zoom'], [`${KSHIFT}1 · ${KSHIFT}0`, 'Fit · 100%'], ['Alt drag', 'Move without guides']

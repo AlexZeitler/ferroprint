@@ -29,6 +29,8 @@ export const ICONS = {
 
 export const LIBRARY_ICON = I(<><rect x="3" y="3" width="6" height="6" /><rect x="11" y="3" width="6" height="6" /><rect x="3" y="11" width="6" height="6" /><path d="M14 11 V17 M11 14 H17" /></>);
 
+export const PIN_ICON = <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" style={{ fill: 'none', stroke: 'currentColor', strokeWidth: 1.2 }}><path d="M4 1.5 H8 L7.4 5 L9.5 7 H2.5 L4.6 5 Z M6 7 V10.5" strokeLinejoin="round" /></svg>;
+
 export const PALETTE = [
   { label: 'Draw', tools: ['select', 'hand', 'connector', 'pen', 'line'] },
   { label: 'System', tools: ['box', 'service', 'database', 'queue', 'actor', 'zone'] },

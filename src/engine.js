@@ -1,5 +1,6 @@
 // Ferroprint engine: constants, geometry, document model, export helpers.
 import { SYMBOLS } from './library.jsx';
+import { isCloudKey, cloudIcon, cloudLabel, cloudProvider, PROVIDER_NAME } from './cloud.js';
 
 export const MONO = "'IBM Plex Mono', ui-monospace, monospace";
 
@@ -29,7 +30,7 @@ const BASE_SHAPES = {
 // Every shape a tool can place: the palette shapes and the library symbols.
 export const SHAPES = { ...BASE_SHAPES, ...Object.fromEntries(Object.values(SYMBOLS).map(s => [s.id, { name: s.name, w: s.w, h: s.h, label: s.label }])) };
 const symbolSet = test => Object.fromEntries(Object.values(SYMBOLS).filter(test).map(s => [s.id, 1]));
-export const TYPE_NAME = { path: 'Freehand', line: 'Line', ...Object.fromEntries(Object.entries(SHAPES).map(([k, v]) => [k, v.name])) };
+export const TYPE_NAME = { path: 'Freehand', line: 'Line', cloud: 'Cloud icon', ...Object.fromEntries(Object.entries(SHAPES).map(([k, v]) => [k, v.name])) };
 export const TOOL_NAMES = { select: 'Select', hand: 'Pan', connector: 'Connector', pen: 'Pen', line: 'Line / wall', ...Object.fromEntries(Object.entries(SHAPES).map(([k, v]) => [k, v.name])) };
 export const KEYS = { v: 'select', h: 'hand', c: 'connector', p: 'pen', l: 'line', b: 'box', r: 'service', d: 'database', q: 'queue', u: 'actor', g: 'zone', k: 'decision', e: 'terminal', w: 'window', o: 'button', i: 'input', m: 'image', n: 'note', t: 'text' };
 export const KEY_OF = Object.fromEntries(Object.entries(KEYS).map(([k, v]) => [v, k.toUpperCase()]));
@@ -42,11 +43,31 @@ export const HINTS = {
   zone: 'Drag to frame a region'
 };
 export const LABELLESS = { path: 1, line: 1, ...symbolSet(s => !s.lab) };
-export const NOFILL = { text: 1, actor: 1, path: 1, line: 1, ...symbolSet(s => !s.fill) };
+export const NOFILL = { text: 1, actor: 1, path: 1, line: 1, cloud: 1, ...symbolSet(s => !s.fill) };
+// Shapes without a line style: a cloud icon keeps the lines of its source drawing.
+export const NOLINE = { cloud: 1 };
 // Shapes that rotate in 90° steps and mirror, such as doors and furniture.
 export const TURN = symbolSet(s => s.turn);
 // Shapes with the label under the drawing, so the label is part of the hit area.
-const BELOW = { actor: 1, ...symbolSet(s => s.below) };
+const BELOW = { actor: 1, cloud: 1, ...symbolSet(s => s.below) };
+
+// A tool places a palette shape, a library symbol or a cloud icon. Cloud icon tools are "cloud:<key>".
+export const CLOUD_SIZE = 48;
+export function toolShape(tool) {
+  if (SHAPES[tool]) return { type: tool, ...SHAPES[tool] };
+  if (typeof tool === 'string' && tool.startsWith('cloud:') && isCloudKey(tool.slice(6))) {
+    const key = tool.slice(6), ic = cloudIcon(key);
+    return { type: 'cloud', icon: key, name: ic ? ic.n : 'Cloud icon', w: CLOUD_SIZE, h: CLOUD_SIZE, label: cloudLabel(ic) };
+  }
+  return null;
+}
+export const toolName = tool => (TOOL_NAMES[tool] || (toolShape(tool) || {}).name || tool);
+export function nodeTitle(n) {
+  if (n.type !== 'cloud') return TYPE_NAME[n.type] || n.type;
+  const ic = cloudIcon(n.icon);
+  return ic ? cloudLabel(ic) : 'Cloud icon';
+}
+export const nodeMeta = n => (n.type === 'cloud' ? PROVIDER_NAME[cloudProvider(n.icon)] : null);
 export const THEMES = {
   blue: { paper: '#1e4d8c', ink: '#eef4ff', muted: 'rgba(238,244,255,0.74)', panel: '#1a4580', hover: 'rgba(238,244,255,0.10)', line: 'rgba(238,244,255,0.32)', minor: 'rgba(238,244,255,0.075)', major: 'rgba(238,244,255,0.17)', tint: 'rgba(238,244,255,0.10)', hatch: 'rgba(238,244,255,0.42)', accent: '#f4bf4f', accentInk: '#1a2a48', vig: 'rgba(3,12,36,0.40)', tex: [1, 1, 1] },
   white: { paper: '#f4f2eb', ink: '#24398a', muted: 'rgba(36,57,138,0.78)', panel: '#ece9df', hover: 'rgba(36,57,138,0.08)', line: 'rgba(36,57,138,0.30)', minor: 'rgba(36,57,138,0.07)', major: 'rgba(36,57,138,0.15)', tint: 'rgba(36,57,138,0.07)', hatch: 'rgba(36,57,138,0.38)', accent: '#d1432f', accentInk: '#ffffff', vig: 'rgba(80,64,20,0.14)', tex: [0.14, 0.22, 0.54] }
@@ -190,10 +211,11 @@ export function wrap(text, maxW, font, ls) {
 }
 
 // ---------- document model
-export function newNode(type, r) {
-  const sh = SHAPES[type];
+export function newNode(tool, r) {
+  const sh = toolShape(tool), type = sh.type;
   const n = { id: uid(), type, x: r.x, y: r.y, w: r.w, h: r.h, label: sh.label, sub: '', dashed: type === 'zone', fill: 'none', size: type === 'zone' ? 's' : 'm', flip: false };
   if (TURN[type]) n.rot = 0;
+  if (type === 'cloud') n.icon = sh.icon;
   return n;
 }
 export function newSheet(number) {
@@ -291,7 +313,8 @@ const oneOf = (v, list, d) => (list.includes(v) ? v : d);
 function cleanNode(n, ids) {
   if (!n || typeof n !== 'object') return null;
   const type = n.type;
-  if (!SHAPES[type] && type !== 'path' && type !== 'line') return null;
+  if (!SHAPES[type] && type !== 'path' && type !== 'line' && type !== 'cloud') return null;
+  if (type === 'cloud' && !isCloudKey(n.icon)) return null;
   if (![n.x, n.y, n.w, n.h].every(num)) return null;
   let id = str(n.id);
   if (!id || ids.has(id)) id = uid();
@@ -304,6 +327,7 @@ function cleanNode(n, ids) {
     flip: !!n.flip
   };
   if (TURN[type]) out.rot = oneOf(n.rot, [0, 90, 180, 270], 0);
+  if (type === 'cloud') out.icon = n.icon;
   if (type === 'path' || type === 'line') {
     const pts = Array.isArray(n.pts) ? n.pts.filter(p => Array.isArray(p) && num(p[0]) && num(p[1])).map(p => [p[0], p[1]]) : [];
     if (pts.length < 2) return null;

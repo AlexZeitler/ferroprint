@@ -1,7 +1,8 @@
 // Pure SVG drawing for shapes, connectors and dimension marks.
 // `ctx` holds the theme (t), the lettering (L), the caps flag, the sheet unit and the grid size.
 import { SIZES, WEIGHTS, MONO, measure, wrap, linePts, edgeGeom, areaLabel, fmtLen, f1, hitBox } from './engine.js';
-import { SYMBOLS, makePen } from './library.jsx';
+import { SYMBOLS, makePen, cloudPaths } from './library.jsx';
+import { cloudIcon } from './cloud.js';
 
 export const txt = (ctx, s) => (ctx.caps ? String(s).toUpperCase() : String(s));
 
@@ -45,7 +46,23 @@ function renderSymbol(n, ctx, sym) {
   return <g key={n.id} data-k="node" data-id={n.id}>{k}</g>;
 }
 
+// A cloud icon keeps its aspect ratio inside the box. The label sits below, like the system symbols.
+function renderCloud(n, ctx) {
+  const { t } = ctx, ic = cloudIcon(n.icon), hb = hitBox(n);
+  const k = [<rect key="hit" x={hb.x} y={hb.y} width={Math.max(hb.w, 1)} height={Math.max(hb.h, 1)} fill="transparent" />];
+  if (ic) {
+    const [vx, vy, vw, vh] = ic.v, s = Math.min(n.w / vw, n.h / vh) || 1;
+    const ox = n.x + (n.w - vw * s) / 2, oy = n.y + (n.h - vh * s) / 2;
+    k.push(<g key="s" transform={`translate(${ox} ${oy}) scale(${s}) translate(${-vx} ${-vy})`}>{cloudPaths(ic, t, 1.4 / s, false)}</g>);
+  } else {
+    k.push(<rect key="s" x={n.x} y={n.y} width={n.w} height={n.h} fill="none" stroke={t.line} strokeWidth={1} strokeDasharray="4 3" />);
+  }
+  k.push(...labelEls(n, ctx, { x: n.x + n.w / 2, top: n.y + n.h + 6, maxW: Math.max(140, n.w * 2) }));
+  return <g key={n.id} data-k="node" data-id={n.id}>{k}</g>;
+}
+
 export function renderNode(n, ctx) {
+  if (n.type === 'cloud') return renderCloud(n, ctx);
   const sym = SYMBOLS[n.type];
   if (sym) return renderSymbol(n, ctx, sym);
   const { t, L } = ctx;
