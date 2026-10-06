@@ -21,6 +21,7 @@ Open the app: https://bjarneo.github.io/ferroprint/
 - Start a sheet from a template: an AWS three-tier web app, an Azure hub-and-spoke network, a Google Cloud data pipeline, an Alibaba Cloud web app, a furnished apartment, a checkout flow or a microservices overview.
 - Connect shapes with elbow, straight or curved connectors. Drag from a port to fix the side where a connector leaves a shape, and release on a port to fix the side where it arrives. Drag the round handle on a selected connector to add a bend. Double-click a bend to remove it.
 - Group shapes with `Ctrl G`, so they select and move as one. `Ctrl`-click selects one shape inside a group. Lock a shape with `Ctrl Shift L`, so it does not move. A locked background plan lets clicks through to the shapes on top.
+- Turn on clean mode with **Clean** in the top bar or `Ctrl \` (`⌘\` on macOS). Clean mode shows only the toolbar and the drawing. To show everything again, press the same keys or use **SHOW ALL** at the top of the toolbar.
 - Share a project with a link. The link holds the whole project in its `#` part, which the browser does not send to a server.
 - Draw freehand strokes and walls. Hold Shift to snap a wall to 45°.
 - Organize a project in numbered sheets, each with its own title block and drawing units (px, ft or m).

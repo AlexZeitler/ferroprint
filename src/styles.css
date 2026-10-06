@@ -964,6 +964,36 @@ button.cell:hover { background: var(--hover); }
 }
 .toast button:hover { background: var(--paper); color: var(--ink); }
 
+/* ---------- clean mode: the tool palette and the drawing, nothing else */
+.app.clean .sheet-area,
+.app.clean .texture,
+.app.clean .vignette { inset: 0; }
+.app.clean .palette {
+  top: 16px;
+  left: 16px;
+  max-height: calc(100% - 32px);
+}
+.app.clean .panel.float {
+  top: 16px;
+  left: 124px;
+  max-height: calc(100% - 32px);
+}
+.app.clean .toast { top: 16px; }
+.clean-exit {
+  flex: none;
+  height: 26px;
+  margin: 6px 0 2px;
+  border: 1px solid var(--ink);
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--sans);
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  cursor: pointer;
+}
+.clean-exit:hover { background: var(--ink); color: var(--paper); }
+
 /* ---------- small screens: one scrolling toolbar row, and the inspector as a bottom sheet */
 .app.tiny .topbar {
   right: 40px;
@@ -997,3 +1027,4 @@ button.cell:hover { background: var(--hover); }
 @media (max-width: 760px) {
   .keys { columns: 1; }
 }
+.app.tiny.clean .panel.float { left: 16px; right: 16px; }

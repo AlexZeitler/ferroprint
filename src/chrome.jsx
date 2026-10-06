@@ -66,8 +66,16 @@ function NumField({ label, value, onCommit, disabled }) {
   );
 }
 
-export function Frame({ cols, rows, texture }) {
+export function Frame({ cols, rows, texture, clean }) {
   const cells = (list, cls) => list.map(c => <div key={c} className={cls}>{c}</div>);
+  if (clean) {
+    return (
+      <>
+        <div className="texture" style={{ backgroundImage: texture }} />
+        <div className="vignette" />
+      </>
+    );
+  }
   return (
     <>
       <div className="texture" style={{ backgroundImage: texture }} />
@@ -120,12 +128,13 @@ export function TopBar({ barRef, save, canUndo, canRedo, snap, dims, mode, panel
       <div className="group">
         <Btn on={panel === 'setup'} title="Lettering, grid and connector defaults" onClick={on.setup}>Setup</Btn>
         <Btn on={panel === 'help'} title="Keyboard shortcuts (?)" onClick={on.help}>Keys</Btn>
+        <Btn title={`Clean mode: show only the toolbar (${MOD}\\)`} onClick={on.clean}>Clean</Btn>
       </div>
     </div>
   );
 }
 
-export function Palette({ tool, onTool, recent, pins, onUnpin, theme, libraryOpen, onLibrary, onSymbol }) {
+export function Palette({ tool, onTool, recent, pins, onUnpin, theme, libraryOpen, onLibrary, onSymbol, clean, onClean }) {
   const group = g => (
     <div key={g.label}>
       <div className="caption">{g.label.toUpperCase()}</div>
@@ -166,6 +175,7 @@ export function Palette({ tool, onTool, recent, pins, onUnpin, theme, libraryOpe
   );
   return (
     <nav className="palette" aria-label="Tools">
+      {clean && <button type="button" className="clean-exit" title={`Show the full interface (${MOD}\\)`} onClick={onClean}>SHOW ALL</button>}
       {group(PALETTE[0])}
       {library}
       {PALETTE.slice(1).map(group)}
@@ -423,7 +433,7 @@ const KEYMAP = [
   ['Drag a connector', 'Add a bend · double-click a bend to remove it'],
   ['/', 'Library: shapes and cloud icons'], [`${KSHIFT}R · ${KSHIFT}H`, 'Rotate · flip doors and furniture'],
   [`${MOD}S`, 'Save now'], [`${MOD}O`, 'Open a JSON file'], ['?', 'Show this list'],
-  ['Delete', 'Remove selection'], ['Arrows', 'Nudge · shift = one square'], ['Scroll', 'Pan'],
+  [`${MOD}\\`, 'Clean mode: only the toolbar'], ['Delete', 'Remove selection'], ['Arrows', 'Nudge · shift = one square'], ['Scroll', 'Pan'],
   [`${MOD}Scroll · + −`, 'Zoom'], [`${KSHIFT}1 · ${KSHIFT}0`, 'Fit · 100%'], ['Alt drag', 'Move without guides']
 ];
 

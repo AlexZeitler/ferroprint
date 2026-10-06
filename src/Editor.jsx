@@ -4,12 +4,14 @@ import * as F from './engine.js';
 import { renderNode, renderEdge, renderDims } from './draw.jsx';
 import { SYMBOLS } from './library.jsx';
 import { loadCloud, onCloudLoad, cloudProvider, cloudSet, cloudFailed, isCloudKey, FRAME } from './cloud.js';
-import { Frame, TopBar, Palette, Inspector, HelpPanel, SetupPanel, LibraryPanel, NewPanel, SharePanel, IncomingPanel, TitleBlock, StatusBar, Toast } from './chrome.jsx';
+import { Frame, TopBar, Palette, Inspector, HelpPanel, SetupPanel, LibraryPanel, NewPanel, SharePanel, IncomingPanel, TitleBlock, StatusBar, Toast, MOD } from './chrome.jsx';
 import { DOC_KEY, loadDoc, parseDoc, saveDoc, loadUI, saveUI, storageAvailable } from './storage.js';
 import { shareLink, sharedPayload, readShared, clearShared } from './share.js';
 import { TEMPLATES } from './templates.js';
 
 const SAVE_DELAY = 400;
+// The space between the window edge and the sheet. Clean mode removes it.
+const FRAME_INSET = 29;
 const HISTORY_LIMIT = 150;
 const RECENT_MAX = 3;
 const PIN_MAX = 24;
@@ -34,7 +36,7 @@ export default class Editor extends Component {
     this.state = {
       doc: stored ? stored.doc : F.exampleDoc(),
       tool: 'select', sel: [], hover: null, editing: null, marquee: null, guides: [], temp: null, draft: null,
-      snap: ui.snap !== false, dims: ui.dims !== false, mode: ui.mode === 'white' ? 'white' : 'blue',
+      snap: ui.snap !== false, dims: ui.dims !== false, mode: ui.mode === 'white' ? 'white' : 'blue', clean: ui.clean === true,
       recent: Array.isArray(ui.recent) ? ui.recent.filter(isLibraryTool).slice(0, RECENT_MAX) : ['stairs', 'sofa', 'cloud'],
       pins: Array.isArray(ui.pins) ? ui.pins.filter(isLibraryTool).slice(0, PIN_MAX) : [], ghost: null,
       size: { w: 0, h: 0 }, cursor: { x: 0, y: 0 }, space: false, panning: false,
@@ -104,7 +106,7 @@ export default class Editor extends Component {
     const st = this.state;
     if (this._mode !== st.mode) { this._mode = st.mode; this.applyTheme(); }
     if (this._doc !== st.doc) { this._doc = st.doc; this.scheduleSave(); }
-    const prefs = { snap: st.snap, dims: st.dims, mode: st.mode, recent: st.recent, pins: st.pins }, ui = JSON.stringify(prefs);
+    const prefs = { snap: st.snap, dims: st.dims, mode: st.mode, clean: st.clean, recent: st.recent, pins: st.pins }, ui = JSON.stringify(prefs);
     if (ui !== this._ui) { this._ui = ui; saveUI(prefs); }
     this.ensureClouds();
     if (!this.sheet().view && this.canvasEl && this.canvasEl.getBoundingClientRect().width > 0) this.fit();
@@ -186,7 +188,9 @@ export default class Editor extends Component {
   fitView() {
     const s = this.sheet(), { w, h: H } = this.measure();
     if (!w) return null;
-    const b = F.bounds(s.nodes), L = 140, R = 60, T = 80, B = 160, aw = Math.max(100, w - L - R), ah = Math.max(100, H - T - B);
+    // Leave room for the toolbars. Clean mode keeps only the tool palette on the left.
+    const [L, R, T, B] = this.state.clean ? [130, 40, 40, 40] : [140, 60, 80, 160];
+    const b = F.bounds(s.nodes), aw = Math.max(100, w - L - R), ah = Math.max(100, H - T - B);
     if (!b) return { x: L + 40, y: T + 40, k: 1 };
     const k = F.clamp(Math.min(aw / b.w, ah / b.h), 0.2, 1.25);
     return { k, x: L + aw / 2 - (b.x + b.w / 2) * k, y: T + ah / 2 - (b.y + b.h / 2) * k };
@@ -782,6 +786,18 @@ export default class Editor extends Component {
   rotateSel() { this.turnSelection(F.rotateNode); }
   flipSel() { this.turnSelection(n => ({ ...n, flip: !n.flip })); }
   togglePanel(name) { this.setState(st => ({ panel: st.panel === name ? null : name })); }
+  // Clean mode shows only the tool palette and the drawing. The sheet grows to the window edge, so every
+  // view moves by the frame inset, and the drawing stays in the same place on the screen.
+  toggleClean() {
+    const clean = !this.state.clean, dx = clean ? FRAME_INSET : -FRAME_INSET;
+    this.setState(st => ({
+      clean,
+      panel: st.panel === 'library' || st.panel === 'incoming' ? st.panel : null,
+      doc: { ...st.doc, sheets: st.doc.sheets.map(sh => (sh.view ? { ...sh, view: { ...sh.view, x: sh.view.x + dx, y: sh.view.y + dx } } : sh)) }
+    }));
+    if (clean) this.flash(`Clean mode is on. To show everything again, press ${MOD}\\ or use SHOW ALL.`, 4000);
+    else { clearTimeout(this._toastT); this.setState({ toast: null }); }
+  }
   openFile() { if (this.fileRef.current) this.fileRef.current.click(); }
 
   onKey(e) {
@@ -802,6 +818,7 @@ export default class Editor extends Component {
       else if (k === 'a') { e.preventDefault(); const s = this.sheet(); this.setState({ sel: [...s.nodes.filter(n => !n.locked).map(n => n.id), ...s.edges.map(x => x.id)] }); }
       else if (e.code === 'KeyG') { e.preventDefault(); if (e.altKey) this.wrapZone(); else if (e.shiftKey) this.ungroupSel(); else this.groupSel(); }
       else if (e.code === 'KeyL' && e.shiftKey) { e.preventDefault(); this.lockSel(); }
+      else if (e.code === 'Backslash' || k === '\\') { e.preventDefault(); this.toggleClean(); }
       return;
     }
     if (k === 'delete' || k === 'backspace') { if (this.state.sel.length) { e.preventDefault(); this.del(); } return; }
@@ -1209,11 +1226,11 @@ export default class Editor extends Component {
       '--accent': t.accent, '--accent-ink': t.accentInk, '--vig': t.vig, '--pal-top': st.palTop + 'px'
     };
     return (
-      <div className={'app' + (tiny ? ' tiny' : '')} style={vars}>
+      <div className={'app' + (tiny ? ' tiny' : '') + (st.clean ? ' clean' : '')} style={vars}>
         <div className="sheet-area">{this.renderCanvas(s, ctx)}</div>
-        <Frame cols={cols} rows={rows} texture={TEXTURES[st.mode]} />
+        <Frame cols={cols} rows={rows} texture={TEXTURES[st.mode]} clean={st.clean} />
 
-        {s.nodes.length === 0 && !this.drag && (
+        {s.nodes.length === 0 && !this.drag && !st.clean && (
           <div className="empty">
             <div>
               <h2>EMPTY SHEET</h2>
@@ -1222,7 +1239,7 @@ export default class Editor extends Component {
           </div>
         )}
 
-        <TopBar
+        {!st.clean && <TopBar
           barRef={this.barRef} save={st.save} canUndo={this.undoStack.length > 0} canRedo={this.redoStack.length > 0}
           snap={st.snap} dims={st.dims} mode={st.mode} panel={st.panel}
           on={{
@@ -1231,15 +1248,16 @@ export default class Editor extends Component {
             blue: () => this.setState({ mode: 'blue' }), white: () => this.setState({ mode: 'white' }),
             newDoc: () => this.togglePanel('new'), open: () => this.openFile(), share: () => (st.panel === 'share' ? this.shareUI.close() : this.openShare()),
             png: () => this.exportImg('png'), svg: () => this.exportImg('svg'), json: () => this.exportJSON(),
-            setup: () => this.togglePanel('setup'), help: () => this.togglePanel('help')
+            setup: () => this.togglePanel('setup'), help: () => this.togglePanel('help'), clean: () => this.toggleClean()
           }}
-        />
+        />}
         <Palette
           tool={st.tool} onTool={id => this.setTool(id)} recent={st.recent} pins={st.pins} onUnpin={id => this.togglePin(id)} theme={t}
           libraryOpen={st.panel === 'library'} onLibrary={() => this.togglePanel('library')} onSymbol={id => this.pickSymbol(id)}
+          clean={st.clean} onClean={() => this.toggleClean()}
         />
 
-        <Inspector
+        {!st.clean && <Inspector
           nodes={s.nodes.filter(n => ids.has(n.id))} edges={s.edges.filter(e => ids.has(e.id))} nodeById={map}
           fmt={px => F.fmtLen(px, s.unit, g)}
           setNode={(id, patch, key) => { this.pushHistory(key); this.setNodes(a => a.map(q => (q.id === id ? { ...q, ...patch } : q))); }}
@@ -1264,7 +1282,7 @@ export default class Editor extends Component {
               }));
             }
           }}
-        />
+        />}
 
         {st.panel === 'help' && <HelpPanel onClose={() => this.setState({ panel: null })} />}
         {st.panel === 'library' && (
@@ -1277,7 +1295,7 @@ export default class Editor extends Component {
         {st.panel === 'incoming' && st.incoming && <IncomingPanel doc={st.incoming} on={this.inUI} />}
         {st.panel === 'setup' && <SetupPanel settings={d.settings} onSet={patch => this.setSettings(patch)} onClose={() => this.setState({ panel: null })} />}
 
-        {!tiny && (
+        {!tiny && !st.clean && (
           <TitleBlock
             wide={wide}
             tb={{
@@ -1292,7 +1310,7 @@ export default class Editor extends Component {
           />
         )}
 
-        <StatusBar
+        {!st.clean && <StatusBar
           right={wide ? 500 : tiny ? 40 : 280} cursor={st.cursor} zoomPct={Math.round(v.k * 100) + '%'}
           tool={F.toolName(tool).toUpperCase() + (F.KEY_OF[tool] ? ` · ${F.KEY_OF[tool]}` : '')}
           hint={F.HINTS[tool] || (F.TURN[tool] ? 'Click to place · drag to size · ⇧R rotates' : 'Click to place · drag to size')}
@@ -1302,7 +1320,7 @@ export default class Editor extends Component {
             zoomIn: () => this.zoomCenter(1.2), zoomOut: () => this.zoomCenter(1 / 1.2), zoom100: () => this.zoomCenter(1 / v.k), fit: () => this.fit(),
             addSheet: () => this.addSheet(), delSheet: () => this.delSheet()
           }}
-        />
+        />}
 
         <Toast toast={st.toast} />
         <input ref={this.fileRef} type="file" accept=".json,application/json" onChange={this.onFile} hidden />
