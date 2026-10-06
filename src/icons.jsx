@@ -27,6 +27,8 @@ export const ICONS = {
   text: I(<path d="M5 4 H15 M10 4 V16 M7.5 16 H12.5" />)
 };
 
+export const LIBRARY_ICON = I(<><rect x="3" y="3" width="6" height="6" /><rect x="11" y="3" width="6" height="6" /><rect x="3" y="11" width="6" height="6" /><path d="M14 11 V17 M11 14 H17" /></>);
+
 export const PALETTE = [
   { label: 'Draw', tools: ['select', 'hand', 'connector', 'pen', 'line'] },
   { label: 'System', tools: ['box', 'service', 'database', 'queue', 'actor', 'zone'] },

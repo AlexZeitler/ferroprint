@@ -1,6 +1,7 @@
 // Pure SVG drawing for shapes, connectors and dimension marks.
 // `ctx` holds the theme (t), the lettering (L), the caps flag, the sheet unit and the grid size.
-import { SIZES, WEIGHTS, MONO, measure, wrap, linePts, edgeGeom, areaLabel, fmtLen, f1 } from './engine.js';
+import { SIZES, WEIGHTS, MONO, measure, wrap, linePts, edgeGeom, areaLabel, fmtLen, f1, hitBox } from './engine.js';
+import { SYMBOLS, makePen } from './library.jsx';
 
 export const txt = (ctx, s) => (ctx.caps ? String(s).toUpperCase() : String(s));
 
@@ -9,18 +10,44 @@ function labelEls(n, ctx, o) {
   const fs = SIZES[n.size || 'm'] * (o.scale || 1), lsp = L.ls * fs, font = `${L.weight} ${fs}px ${L.family}`;
   const str = n.label ? txt(ctx, n.label) : '';
   let lines = str ? wrap(str, Math.max(20, o.maxW), font, lsp) : [];
-  if (o.maxLines) lines = lines.slice(0, o.maxLines);
+  if (o.maxLines && lines.length > o.maxLines) {
+    lines = lines.slice(0, o.maxLines);
+    lines[o.maxLines - 1] += '…';
+  }
   const sub = o.sub !== undefined ? o.sub : n.sub, sfs = Math.max(10, Math.round(fs * 0.7));
   const lh = fs * L.lh, total = lines.length * lh + (sub ? sfs * 1.6 : 0);
   const y0 = o.top != null ? o.top : o.cy - total / 2, anchor = o.anchor || 'middle';
-  const els = lines.map((ln, i) => (
-    <text key={'l' + i} x={o.x} y={y0 + lh * i + lh / 2} textAnchor={anchor} dominantBaseline="central" fill={o.color || t.ink} fontFamily={L.family} fontWeight={L.weight} fontSize={fs} letterSpacing={lsp}>{ln}</text>
+  const els = [];
+  // A paper plate behind the label keeps it legible on top of the lines of a symbol.
+  if (o.bg && lines.length) {
+    const tw = Math.max(...lines.map(ln => measure(ln, font) + ln.length * lsp)) + 12;
+    els.push(<rect key="bg" x={anchor === 'start' ? o.x - 6 : o.x - tw / 2} y={y0 - 2} width={tw} height={lines.length * lh + 4} fill={t.paper} />);
+  }
+  lines.forEach((ln, i) => els.push(
+    <text key={'l' + i} x={o.x} y={y0 + lh * i + lh / 2} textAnchor={anchor} dominantBaseline="central" fill={o.color || (o.muted ? t.muted : t.ink)} fontFamily={L.family} fontWeight={L.weight} fontSize={fs} letterSpacing={lsp}>{ln}</text>
   ));
   if (sub) els.push(<text key="sub" x={o.x} y={y0 + lines.length * lh + sfs * 0.95} textAnchor={anchor} dominantBaseline="central" fill={t.muted} fontFamily={MONO} fontSize={sfs}>{sub}</text>);
   return els;
 }
 
+// A library symbol draws in its own unrotated box. The transform turns and mirrors it into the node box.
+function renderSymbol(n, ctx, sym) {
+  const { t } = ctx, rot = n.rot || 0, side = rot % 180 !== 0;
+  const lw = side ? n.h : n.w, lh = side ? n.w : n.h, cx = n.x + n.w / 2, cy = n.y + n.h / 2;
+  const fill = n.fill === 'tint' ? t.tint : n.fill === 'hatch' ? 'url(#fp-hatch)' : 'none';
+  const P = makePen(t, fill, n.dashed ? '7 5' : undefined, false);
+  const hb = hitBox(n), k = [<rect key="hit" x={hb.x} y={hb.y} width={Math.max(hb.w, 1)} height={Math.max(hb.h, 1)} fill="transparent" />];
+  k.push(<g key="s" transform={`translate(${cx} ${cy}) rotate(${rot})${n.flip ? ' scale(-1 1)' : ''} translate(${-lw / 2} ${-lh / 2})`}>{sym.draw(lw, lh, P)}</g>);
+  if (sym.lab) {
+    const o = sym.lab(n.w, n.h);
+    k.push(...labelEls(n, ctx, { ...o, x: n.x + o.dx, cy: o.cy != null ? n.y + o.cy : undefined, top: o.top != null ? n.y + o.top : undefined }));
+  }
+  return <g key={n.id} data-k="node" data-id={n.id}>{k}</g>;
+}
+
 export function renderNode(n, ctx) {
+  const sym = SYMBOLS[n.type];
+  if (sym) return renderSymbol(n, ctx, sym);
   const { t, L } = ctx;
   const { x, y, w } = n, hh = n.h, cx = x + w / 2, cy = y + hh / 2;
   const fill = n.fill === 'tint' ? t.tint : n.fill === 'hatch' ? 'url(#fp-hatch)' : 'none';
@@ -98,16 +125,6 @@ export function renderNode(n, ctx) {
       }
       break;
     }
-    case 'door':
-      k.push(
-        hit,
-        <g key="d" transform={n.flip ? `translate(${2 * cx} 0) scale(-1 1)` : undefined}>
-          <line x1={x} y1={y + hh} x2={x + w} y2={y + hh} stroke={t.paper} strokeWidth={7} />
-          <line x1={x} y1={y + hh} x2={x} y2={y} stroke={t.ink} strokeWidth={2.5} />
-          <path d={`M${x + w} ${y + hh} A${w} ${hh} 0 0 0 ${x} ${y}`} fill="none" stroke={t.ink} strokeWidth={1} strokeDasharray="4 3" />
-        </g>
-      );
-      break;
     case 'note': {
       const f = Math.min(18, w * 0.2, hh * 0.2);
       k.push(

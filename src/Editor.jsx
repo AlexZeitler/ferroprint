@@ -2,11 +2,14 @@ import { Component, createRef } from 'react';
 import { flushSync } from 'react-dom';
 import * as F from './engine.js';
 import { renderNode, renderEdge, renderDims } from './draw.jsx';
-import { Frame, TopBar, Palette, Inspector, HelpPanel, SetupPanel, TitleBlock, StatusBar, Toast } from './chrome.jsx';
+import { SYMBOLS } from './library.jsx';
+import { Frame, TopBar, Palette, Inspector, HelpPanel, SetupPanel, LibraryPanel, TitleBlock, StatusBar, Toast } from './chrome.jsx';
 import { DOC_KEY, loadDoc, parseDoc, saveDoc, loadUI, saveUI, storageAvailable } from './storage.js';
 
 const SAVE_DELAY = 400;
 const HISTORY_LIMIT = 150;
+const RECENT_MAX = 3;
+const PALETTE_TOOLS = new Set(['door']);
 
 function textureFor(mode) {
   const [r, g, b] = F.THEMES[mode].tex;
@@ -23,6 +26,7 @@ export default class Editor extends Component {
       doc: stored ? stored.doc : F.exampleDoc(),
       tool: 'select', sel: [], hover: null, editing: null, marquee: null, guides: [], temp: null, draft: null,
       snap: ui.snap !== false, dims: ui.dims !== false, mode: ui.mode === 'white' ? 'white' : 'blue',
+      recent: Array.isArray(ui.recent) ? ui.recent.filter(id => SYMBOLS[id]).slice(0, RECENT_MAX) : ['stairs', 'sofa', 'cloud'], ghost: null,
       size: { w: 0, h: 0 }, cursor: { x: 0, y: 0 }, space: false, panning: false,
       panel: null, toast: null, delArm: false, palTop: 92,
       win: { w: window.innerWidth, h: window.innerHeight },
@@ -78,8 +82,8 @@ export default class Editor extends Component {
     const st = this.state;
     if (this._mode !== st.mode) { this._mode = st.mode; this.applyTheme(); }
     if (this._doc !== st.doc) { this._doc = st.doc; this.scheduleSave(); }
-    const ui = JSON.stringify({ snap: st.snap, dims: st.dims, mode: st.mode });
-    if (ui !== this._ui) { this._ui = ui; saveUI({ snap: st.snap, dims: st.dims, mode: st.mode }); }
+    const prefs = { snap: st.snap, dims: st.dims, mode: st.mode, recent: st.recent }, ui = JSON.stringify(prefs);
+    if (ui !== this._ui) { this._ui = ui; saveUI(prefs); }
     if (!this.sheet().view && this.canvasEl && this.canvasEl.getBoundingClientRect().width > 0) this.fit();
     const bar = this.barRef.current;
     if (bar) {
@@ -316,6 +320,12 @@ export default class Editor extends Component {
       this.setState(st);
       return;
     }
+    if (d.type === 'place') {
+      if (!d.started && Math.hypot(e.clientX - d.sx, e.clientY - d.sy) > 5) d.started = true;
+      if (d.started) st.ghost = this.canvasEl.contains(e.target) ? { shape: d.shape, p } : null;
+      this.setState(st);
+      return;
+    }
     if (d.type === 'pinch') {
       if (this.pointers.size < 2) return;
       const [a, b] = [...this.pointers.values()], r = this.canvasEl.getBoundingClientRect(), v0 = d.v0;
@@ -407,13 +417,21 @@ export default class Editor extends Component {
     if (touch) this.detectDoubleTap(e);
     if (!d) return;
     const p = this.toWorld(e.clientX, e.clientY), st = {};
-    if (d.type === 'pan') st.panning = false;
+    if (d.type === 'place') {
+      st.ghost = null;
+      const over = document.elementFromPoint(e.clientX, e.clientY);
+      if (d.started && e.type !== 'pointercancel' && over && this.canvasEl.contains(over)) {
+        const n = F.newNode(d.shape, this.placeRect(d.shape, p));
+        this.pushHistory();
+        this.setNodes(ns => [...ns, n]);
+        Object.assign(st, { sel: [n.id], tool: 'select', recent: this.withRecent(d.shape) });
+      }
+    } else if (d.type === 'pan') st.panning = false;
     else if (d.type === 'create') {
       if (!d.id) {
         // A click without a drag places the shape at its default size, centered on the pointer.
         this.pushHistory();
-        const sz = F.SHAPES[d.shape];
-        const n = F.newNode(d.shape, { x: this.sn(d.start.x - sz.w / 2), y: this.sn(d.start.y - sz.h / 2), w: sz.w, h: sz.h });
+        const n = F.newNode(d.shape, this.placeRect(d.shape, d.start));
         d.id = n.id;
         this.setNodes(ns => (d.shape === 'zone' ? [n, ...ns] : [...ns, n]));
       }
@@ -584,6 +602,26 @@ export default class Editor extends Component {
     this.setNodes(a => { const n = a.find(q => q.id === id); if (!n) return a; const rest = a.filter(q => q.id !== id); return front ? [...rest, n] : [n, ...rest]; });
   }
   setTool(id) { this.setState({ tool: id, temp: null, hover: null }); }
+  // The default box of a shape, centered on a point and snapped to the grid.
+  placeRect(shape, p) { const sz = F.SHAPES[shape]; return { x: this.sn(p.x - sz.w / 2), y: this.sn(p.y - sz.h / 2), w: sz.w, h: sz.h }; }
+  // The palette keeps the last library symbols at hand. Symbols that the palette always shows stay out of the list.
+  withRecent(id) {
+    const r = this.state.recent;
+    return !SYMBOLS[id] || PALETTE_TOOLS.has(id) ? r : [id, ...r.filter(x => x !== id)].slice(0, RECENT_MAX);
+  }
+  pickSymbol(id) {
+    this.setState(st => ({ tool: id, temp: null, hover: null, recent: this.withRecent(id), panel: st.win.w < 640 ? null : st.panel }));
+  }
+  // A drag from a library tile. A short move without a drop stays a click, which picks the tool.
+  startPlace(id, e) { this.drag = { type: 'place', shape: id, sx: e.clientX, sy: e.clientY, started: false }; }
+  turnSelection(fn) {
+    const ids = new Set(this.state.sel), s = this.sheet();
+    if (!s.nodes.some(n => ids.has(n.id) && F.TURN[n.type])) return;
+    this.pushHistory();
+    this.setNodes(a => a.map(n => (ids.has(n.id) && F.TURN[n.type] ? fn(n) : n)));
+  }
+  rotateSel() { this.turnSelection(F.rotateNode); }
+  flipSel() { this.turnSelection(n => ({ ...n, flip: !n.flip })); }
   togglePanel(name) { this.setState(st => ({ panel: st.panel === name ? null : name })); }
   openFile() { if (this.fileRef.current) this.fileRef.current.click(); }
 
@@ -609,10 +647,13 @@ export default class Editor extends Component {
     if (k === 'delete' || k === 'backspace') { if (this.state.sel.length) { e.preventDefault(); this.del(); } return; }
     if (k === 'escape') {
       this.drag = null;
-      this.setState({ sel: [], tool: 'select', panel: null, temp: null, draft: null, marquee: null, guides: [], panning: false, delArm: false });
+      this.setState({ sel: [], tool: 'select', panel: null, temp: null, draft: null, marquee: null, guides: [], ghost: null, panning: false, delArm: false });
       return;
     }
     if (e.key === '?') { this.togglePanel('help'); return; }
+    if (e.key === '/') { e.preventDefault(); this.setState({ panel: 'library' }); return; }
+    if (e.shiftKey && !e.altKey && k === 'r') { this.rotateSel(); return; }
+    if (e.shiftKey && !e.altKey && k === 'h') { this.flipSel(); return; }
     if (k === 'enter') {
       if (this.state.sel.length !== 1) return;
       const id = this.state.sel[0], s = this.sheet();
@@ -836,6 +877,13 @@ export default class Editor extends Component {
     }
     st.guides.forEach((gd, i) => out.push(<line key={'g' + i} x1={gd.x1} y1={gd.y1} x2={gd.x2} y2={gd.y2} stroke={A} strokeWidth={1 / k} strokeDasharray={`${3 / k} ${3 / k}`} pointerEvents="none" />));
     if (st.marquee) { const m = st.marquee; out.push(<rect key="mq" x={m.x} y={m.y} width={m.w} height={m.h} fill={A} fillOpacity={0.08} stroke={A} strokeWidth={1 / k} strokeDasharray={`${4 / k} ${3 / k}`} pointerEvents="none" />); }
+    if (st.ghost) {
+      const n = { ...F.newNode(st.ghost.shape, this.placeRect(st.ghost.shape, st.ghost.p)), id: '__ghost' }, b = F.hitBox(n);
+      out.push(
+        <g key="ghost" opacity={0.6} pointerEvents="none">{renderNode(n, this.drawCtx(s))}</g>,
+        <rect key="ghostbox" x={b.x - 5 / k} y={b.y - 5 / k} width={b.w + 10 / k} height={b.h + 10 / k} fill="none" stroke={A} strokeWidth={1 / k} strokeDasharray={`${4 / k} ${3 / k}`} pointerEvents="none" />
+      );
+    }
     if (st.draft && st.draft.pts.length > 1) out.push(<path key="dr" d={'M' + st.draft.pts.map(q => `${q.x} ${q.y}`).join(' L')} fill="none" stroke={t.ink} strokeWidth={st.draft.kind === 'line' ? F.WEIGHTS.m : F.WEIGHTS.s} strokeLinecap="round" strokeLinejoin="round" pointerEvents="none" />);
     return out;
   }
@@ -933,7 +981,7 @@ export default class Editor extends Component {
           <div className="empty">
             <div>
               <h2>EMPTY SHEET</h2>
-              <p>Pick a shape on the left and click or drag on the sheet. Drag from the small circles around a shape to connect it to another. Double-click empty space to write a label.</p>
+              <p>Pick a shape on the left and click or drag on the sheet. The library has doors, furniture and more. Drag from the small circles around a shape to connect it to another. Double-click empty space to write a label.</p>
             </div>
           </div>
         )}
@@ -950,7 +998,10 @@ export default class Editor extends Component {
             setup: () => this.togglePanel('setup'), help: () => this.togglePanel('help')
           }}
         />
-        <Palette tool={st.tool} onTool={id => this.setTool(id)} />
+        <Palette
+          tool={st.tool} onTool={id => this.setTool(id)} recent={st.recent} theme={t}
+          libraryOpen={st.panel === 'library'} onLibrary={() => this.togglePanel('library')} onSymbol={id => this.pickSymbol(id)}
+        />
 
         <Inspector
           nodes={s.nodes.filter(n => ids.has(n.id))} edges={s.edges.filter(e => ids.has(e.id))} nodeById={map}
@@ -960,12 +1011,18 @@ export default class Editor extends Component {
           act={{
             front: () => this.arrange(true), back: () => this.arrange(false), dup: () => this.duplicate(), del: () => this.del(), wrap: () => this.wrapZone(),
             align: kind => this.align(kind), distribute: axis => this.distribute(axis),
-            flip: () => { const id = st.sel[0]; this.pushHistory(); this.setNodes(a => a.map(q => (q.id === id ? { ...q, flip: !q.flip } : q))); },
+            rotate: () => this.rotateSel(), flip: () => this.flipSel(),
             reverse: () => { const id = st.sel[0]; this.pushHistory(); this.setEdges(a => a.map(q => (q.id === id ? { ...q, from: q.to, to: q.from } : q))); }
           }}
         />
 
         {st.panel === 'help' && <HelpPanel onClose={() => this.setState({ panel: null })} />}
+        {st.panel === 'library' && (
+          <LibraryPanel
+            tool={st.tool} theme={t} onPick={id => this.pickSymbol(id)} onDragStart={(id, e) => this.startPlace(id, e)}
+            onClose={() => this.setState({ panel: null })}
+          />
+        )}
         {st.panel === 'setup' && <SetupPanel settings={d.settings} onSet={patch => this.setSettings(patch)} onClose={() => this.setState({ panel: null })} />}
 
         {!tiny && (
@@ -986,7 +1043,7 @@ export default class Editor extends Component {
         <StatusBar
           right={wide ? 500 : tiny ? 40 : 280} cursor={st.cursor} zoomPct={Math.round(v.k * 100) + '%'}
           tool={(F.TOOL_NAMES[tool] || tool).toUpperCase() + (F.KEY_OF[tool] ? ` · ${F.KEY_OF[tool]}` : '')}
-          hint={F.HINTS[tool] || 'Click to place · drag to size'}
+          hint={F.HINTS[tool] || (F.TURN[tool] ? 'Click to place · drag to size · ⇧R rotates' : 'Click to place · drag to size')}
           tabs={d.sheets.map(q => ({ id: q.id, num: q.number, name: q.name || 'Untitled', full: `${q.number} ${q.name || ''}`, active: q.id === s.id, on: () => this.switchSheet(q.id) }))}
           delLabel={st.delArm ? 'CONFIRM DELETE' : 'DELETE SHEET'}
           on={{

@@ -7,6 +7,14 @@ Open the app: https://bjarneo.github.io/ferroprint/
 ## What you can do
 
 - Draw boxes, services, databases, queues, actors, zones, decisions, windows, buttons, inputs, images, rooms, doors, notes and text.
+- Open the library (`/`) for 69 more symbols in 5 groups:
+  - Plan: doors, double doors, sliding doors, wall windows, openings, stairs and columns.
+  - Furniture: beds, sofas, tables, a desk, bathroom and kitchen fixtures, a closet, a washer, plants and a car.
+  - System: servers, cloud, browser, phone, monitor, auth, functions, containers, internet, files, users, email, storage, firewall, scheduler and secrets.
+  - Flow: data, document, subprocess, manual input, delay, preparation, manual step, data store and page links.
+  - Interface: checkbox, radio, toggle, dropdown, search, slider, progress, avatar, card, nav bar, tabs, dialog, list, text block, table, chart and video.
+- Search the library, click a symbol to place it, or drag a symbol onto the sheet. The palette keeps the last 3 symbols that you used.
+- Rotate doors and furniture 90° with `Shift R`, and mirror them with `Shift H`. Plan symbols use real sizes: on a sheet in feet, one grid square is 1 ft.
 - Connect shapes with elbow, straight or curved connectors.
 - Draw freehand strokes and walls. Hold Shift to snap a wall to 45°.
 - Organize a project in numbered sheets, each with its own title block and drawing units (px, ft or m).
@@ -50,6 +58,7 @@ The workflow in `.github/workflows/pages.yml` builds the app and publishes `dist
 | --- | --- |
 | `src/engine.js` | Shapes, themes, geometry, units, document validation and export helpers |
 | `src/draw.jsx` | SVG drawing for shapes, connectors and dimension marks |
+| `src/library.jsx` | Library symbols, their default sizes and label positions |
 | `src/Editor.jsx` | Editor state, pointer and keyboard input, history, sheets, files and autosave |
 | `src/chrome.jsx` | Toolbars, inspector, panels, title block and status bar |
 | `src/storage.js` | Safe access to `localStorage` |

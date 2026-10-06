@@ -1,4 +1,5 @@
 // Ferroprint engine: constants, geometry, document model, export helpers.
+import { SYMBOLS } from './library.jsx';
 
 export const MONO = "'IBM Plex Mono', ui-monospace, monospace";
 
@@ -8,7 +9,7 @@ export const LETTER = {
 };
 export const SIZES = { s: 13, m: 16, l: 22 };
 export const WEIGHTS = { s: 1.5, m: 3, l: 6 };
-export const SHAPES = {
+const BASE_SHAPES = {
   box: { name: 'Box', w: 160, h: 80, label: 'Component' },
   service: { name: 'Service', w: 160, h: 80, label: 'Service' },
   database: { name: 'Database', w: 120, h: 110, label: 'Database' },
@@ -22,10 +23,12 @@ export const SHAPES = {
   input: { name: 'Input', w: 240, h: 40, label: 'Input' },
   image: { name: 'Image', w: 160, h: 120, label: 'Image' },
   room: { name: 'Room', w: 240, h: 200, label: 'Room' },
-  door: { name: 'Door', w: 60, h: 60, label: '' },
   note: { name: 'Note', w: 200, h: 120, label: 'Note' },
   text: { name: 'Text', w: 160, h: 40, label: 'Label' }
 };
+// Every shape a tool can place: the palette shapes and the library symbols.
+export const SHAPES = { ...BASE_SHAPES, ...Object.fromEntries(Object.values(SYMBOLS).map(s => [s.id, { name: s.name, w: s.w, h: s.h, label: s.label }])) };
+const symbolSet = test => Object.fromEntries(Object.values(SYMBOLS).filter(test).map(s => [s.id, 1]));
 export const TYPE_NAME = { path: 'Freehand', line: 'Line', ...Object.fromEntries(Object.entries(SHAPES).map(([k, v]) => [k, v.name])) };
 export const TOOL_NAMES = { select: 'Select', hand: 'Pan', connector: 'Connector', pen: 'Pen', line: 'Line / wall', ...Object.fromEntries(Object.entries(SHAPES).map(([k, v]) => [k, v.name])) };
 export const KEYS = { v: 'select', h: 'hand', c: 'connector', p: 'pen', l: 'line', b: 'box', r: 'service', d: 'database', q: 'queue', u: 'actor', g: 'zone', k: 'decision', e: 'terminal', w: 'window', o: 'button', i: 'input', m: 'image', n: 'note', t: 'text' };
@@ -36,11 +39,14 @@ export const HINTS = {
   connector: 'Drag from one shape to another',
   pen: 'Draw freehand strokes',
   line: 'Drag to draw · shift snaps to 45°',
-  zone: 'Drag to frame a region',
-  door: 'Click to place · flip it in the inspector'
+  zone: 'Drag to frame a region'
 };
-export const LABELLESS = { door: 1, path: 1, line: 1 };
-export const NOFILL = { text: 1, actor: 1, door: 1, path: 1, line: 1 };
+export const LABELLESS = { path: 1, line: 1, ...symbolSet(s => !s.lab) };
+export const NOFILL = { text: 1, actor: 1, path: 1, line: 1, ...symbolSet(s => !s.fill) };
+// Shapes that rotate in 90° steps and mirror, such as doors and furniture.
+export const TURN = symbolSet(s => s.turn);
+// Shapes with the label under the drawing, so the label is part of the hit area.
+const BELOW = { actor: 1, ...symbolSet(s => s.below) };
 export const THEMES = {
   blue: { paper: '#1e4d8c', ink: '#eef4ff', muted: 'rgba(238,244,255,0.74)', panel: '#1a4580', hover: 'rgba(238,244,255,0.10)', line: 'rgba(238,244,255,0.32)', minor: 'rgba(238,244,255,0.075)', major: 'rgba(238,244,255,0.17)', tint: 'rgba(238,244,255,0.10)', hatch: 'rgba(238,244,255,0.42)', accent: '#f4bf4f', accentInk: '#1a2a48', vig: 'rgba(3,12,36,0.40)', tex: [1, 1, 1] },
   white: { paper: '#f4f2eb', ink: '#24398a', muted: 'rgba(36,57,138,0.78)', panel: '#ece9df', hover: 'rgba(36,57,138,0.08)', line: 'rgba(36,57,138,0.30)', minor: 'rgba(36,57,138,0.07)', major: 'rgba(36,57,138,0.15)', tint: 'rgba(36,57,138,0.07)', hatch: 'rgba(36,57,138,0.38)', accent: '#d1432f', accentInk: '#ffffff', vig: 'rgba(80,64,20,0.14)', tex: [0.14, 0.22, 0.54] }
@@ -93,8 +99,17 @@ export const inter = (a, b) => a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y +
 export const within = (a, b) => a.x >= b.x && a.y >= b.y && a.x + a.w <= b.x + b.w && a.y + a.h <= b.y + b.h;
 export const rectFrom = (a, b) => ({ x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), w: Math.abs(a.x - b.x), h: Math.abs(a.y - b.y) });
 
-// The actor label sits below the figure, so its hit area is larger than its box.
-export const hitBox = n => (n.type === 'actor' ? { x: n.x - 20, y: n.y, w: n.w + 40, h: n.h + 30 } : { x: n.x, y: n.y, w: n.w, h: n.h });
+// Some shapes put the label below the drawing, so their hit area is larger than their box.
+export function hitBox(n) {
+  if (!BELOW[n.type]) return { x: n.x, y: n.y, w: n.w, h: n.h };
+  const pad = n.w < 120 ? 20 : 0;
+  return { x: n.x - pad, y: n.y, w: n.w + 2 * pad, h: n.h + 30 };
+}
+// Turns a shape 90° clockwise about its center. The box stays axis-aligned, so its width and height swap.
+export function rotateNode(n) {
+  const cx = n.x + n.w / 2, cy = n.y + n.h / 2;
+  return { ...n, rot: ((n.rot || 0) + 90) % 360, x: Math.round(cx - n.h / 2), y: Math.round(cy - n.w / 2), w: n.h, h: n.w };
+}
 export function plainBounds(ns) {
   if (!ns.length) return null;
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
@@ -177,7 +192,9 @@ export function wrap(text, maxW, font, ls) {
 // ---------- document model
 export function newNode(type, r) {
   const sh = SHAPES[type];
-  return { id: uid(), type, x: r.x, y: r.y, w: r.w, h: r.h, label: sh.label, sub: '', dashed: type === 'zone', fill: 'none', size: type === 'zone' ? 's' : 'm', flip: false };
+  const n = { id: uid(), type, x: r.x, y: r.y, w: r.w, h: r.h, label: sh.label, sub: '', dashed: type === 'zone', fill: 'none', size: type === 'zone' ? 's' : 'm', flip: false };
+  if (TURN[type]) n.rot = 0;
+  return n;
 }
 export function newSheet(number) {
   return { id: uid(), number, name: 'Untitled sheet', unit: 'px', view: null, nodes: [], edges: [] };
@@ -240,10 +257,26 @@ export function exampleDoc() {
       N('r3', 'room', 80, 320, 240, 200, 'Bedroom'),
       N('r4', 'room', 320, 320, 120, 200, 'Bath'),
       N('r5', 'room', 440, 320, 160, 200, 'Entry'),
+      N('f1', 'sofa', 130, 96, 140, 60, '', '', { rot: 0 }),
+      N('f2', 'armchair', 316, 170, 60, 60, '', '', { rot: 90 }),
+      N('f3', 'plant', 96, 276, 30, 30, '', '', { rot: 0 }),
+      N('f4', 'counter', 406, 84, 120, 40, '', '', { rot: 0 }),
+      N('f5', 'fridge', 532, 84, 60, 50, 'Ref', '', { rot: 0 }),
+      N('f6', 'dining', 425, 226, 150, 90, '', '', { rot: 0 }),
+      N('f7', 'bed', 86, 340, 70, 130, '', '', { rot: 0 }),
+      N('f8', 'closet', 226, 476, 80, 40, '', '', { rot: 180 }),
+      N('f9', 'bathtub', 330, 326, 100, 50, '', '', { rot: 90 }),
+      N('f10', 'toilet', 344, 466, 30, 50, '', '', { rot: 180 }),
+      N('f11', 'sink', 390, 484, 40, 30, '', '', { rot: 180 }),
+      N('f12', 'plant', 560, 344, 30, 30, '', '', { rot: 0 }),
+      N('w1', 'wallwin', 180, 74, 80, 12, '', '', { rot: 0 }),
+      N('w2', 'wallwin', 74, 160, 12, 80, '', '', { rot: 90 }),
+      N('w3', 'wallwin', 74, 380, 12, 80, '', '', { rot: 90 }),
+      N('w4', 'wallwin', 594, 380, 12, 80, '', '', { rot: 90 }),
       N('d1', 'door', 240, 260, 60, 60, ''),
       N('d2', 'door', 340, 260, 60, 60, '', '', { flip: true }),
       N('d3', 'door', 480, 460, 60, 60, ''),
-      N('d4', 'door', 460, 260, 60, 60, '', '', { flip: true })
+      N('d4', 'door', 460, 320, 60, 60, '', '', { rot: 180 })
     ],
     edges: []
   };
@@ -270,6 +303,7 @@ function cleanNode(n, ids) {
     size: oneOf(n.size, ['s', 'm', 'l'], type === 'zone' ? 's' : 'm'),
     flip: !!n.flip
   };
+  if (TURN[type]) out.rot = oneOf(n.rot, [0, 90, 180, 270], 0);
   if (type === 'path' || type === 'line') {
     const pts = Array.isArray(n.pts) ? n.pts.filter(p => Array.isArray(p) && num(p[0]) && num(p[1])).map(p => [p[0], p[1]]) : [];
     if (pts.length < 2) return null;

@@ -1,7 +1,8 @@
 // Editor chrome: the sheet frame, toolbars, inspector, panels, title block and status bar.
-import { useRef, useState } from 'react';
-import { TYPE_NAME, TOOL_NAMES, KEY_OF, LABELLESS, NOFILL, trunc } from './engine.js';
-import { ICONS, PALETTE } from './icons.jsx';
+import { useMemo, useRef, useState } from 'react';
+import { TYPE_NAME, TOOL_NAMES, KEY_OF, LABELLESS, NOFILL, TURN, trunc } from './engine.js';
+import { ICONS, PALETTE, LIBRARY_ICON } from './icons.jsx';
+import { CATEGORIES, SymbolIcon } from './library.jsx';
 
 const IS_MAC = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 export const MOD = IS_MAC ? '⌘' : 'Ctrl ';
@@ -119,25 +120,100 @@ export function TopBar({ barRef, save, canUndo, canRedo, snap, dims, mode, panel
   );
 }
 
-export function Palette({ tool, onTool }) {
+export function Palette({ tool, onTool, recent, theme, libraryOpen, onLibrary, onSymbol }) {
+  const group = g => (
+    <div key={g.label}>
+      <div className="caption">{g.label.toUpperCase()}</div>
+      <div className="tools">
+        {g.tools.map(id => {
+          const name = TOOL_NAMES[id], key = KEY_OF[id];
+          return (
+            <button type="button" key={id} className={cx('tool', tool === id && 'on')} aria-pressed={tool === id} aria-label={name} title={key ? `${name} · ${key}` : name} onClick={() => onTool(id)}>
+              {ICONS[id]}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+  // The library sits under the draw tools, so it stays in view on short screens.
+  const library = (
+    <div key="library">
+      <div className="caption">LIBRARY</div>
+      <div className="tools">
+        <button type="button" className={cx('tool', libraryOpen && 'on')} aria-pressed={libraryOpen} aria-label="Library" title="Library of doors, furniture and more · /" onClick={onLibrary}>
+          {LIBRARY_ICON}
+        </button>
+        {recent.map(id => (
+          <button type="button" key={id} className={cx('tool', tool === id && 'on')} aria-pressed={tool === id} aria-label={TOOL_NAMES[id]} title={TOOL_NAMES[id]} onClick={() => onSymbol(id)}>
+            <SymbolIcon id={id} size={22} t={theme} />
+          </button>
+        ))}
+      </div>
+    </div>
+  );
   return (
     <nav className="palette" aria-label="Tools">
-      {PALETTE.map(g => (
-        <div key={g.label}>
-          <div className="caption">{g.label.toUpperCase()}</div>
-          <div className="tools">
-            {g.tools.map(id => {
-              const name = TOOL_NAMES[id], key = KEY_OF[id];
-              return (
-                <button type="button" key={id} className={cx('tool', tool === id && 'on')} aria-pressed={tool === id} aria-label={name} title={key ? `${name} · ${key}` : name} onClick={() => onTool(id)}>
-                  {ICONS[id]}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      ))}
+      {group(PALETTE[0])}
+      {library}
+      {PALETTE.slice(1).map(group)}
     </nav>
+  );
+}
+
+const ALL = 'all';
+
+export function LibraryPanel({ tool, theme, onPick, onDragStart, onClose }) {
+  const [query, setQuery] = useState('');
+  const [cat, setCat] = useState(ALL);
+  const coarse = useMemo(() => typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(pointer: coarse)').matches, []);
+  const q = query.trim().toLowerCase();
+  const groups = CATEGORIES
+    .filter(c => cat === ALL || c.id === cat)
+    .map(c => ({ ...c, items: c.items.filter(s => !q || `${s.name} ${s.keys || ''} ${c.name}`.toLowerCase().includes(q)) }))
+    .filter(c => c.items.length);
+  const first = groups.length ? groups[0].items[0] : null;
+  const onKeyDown = e => {
+    if (e.key === 'Escape') { e.stopPropagation(); if (query) setQuery(''); else onClose(); }
+    else if (e.key === 'Enter' && first) { e.preventDefault(); onPick(first.id); }
+  };
+  return (
+    <aside className="panel float library" aria-label="Library">
+      <header><h2>LIBRARY</h2><button type="button" className="close" onClick={onClose}>CLOSE</button></header>
+      <div className="lib-head">
+        <input className="field" type="search" value={query} placeholder="Find a shape: door, bed, server…" aria-label="Find a shape" autoFocus={!coarse} spellCheck={false} onChange={e => setQuery(e.target.value)} onKeyDown={onKeyDown} />
+        <div className="seg" role="group" aria-label="Category">
+          {[[ALL, 'All'], ...CATEGORIES.map(c => [c.id, c.name])].map(([id, name]) => (
+            <button type="button" key={id} className={cx(cat === id && 'on')} aria-pressed={cat === id} onClick={() => setCat(id)}>{name}</button>
+          ))}
+        </div>
+      </div>
+      <div className="lib-body">
+        {groups.map(c => (
+          <section key={c.id}>
+            <div className="caption">{c.name.toUpperCase()}</div>
+            <div className="tiles">
+              {c.items.map(sym => (
+                <button
+                  type="button" key={sym.id} className={cx('tile', tool === sym.id && 'on')} aria-pressed={tool === sym.id} title={`${sym.name}: click, then place it on the sheet, or drag it onto the sheet`}
+                  onClick={() => onPick(sym.id)}
+                  onPointerDown={e => { if (e.pointerType === 'mouse' && e.button === 0) onDragStart(sym.id, e); }}
+                >
+                  <SymbolIcon id={sym.id} size={40} t={theme} />
+                  <span>{sym.name}</span>
+                </button>
+              ))}
+            </div>
+          </section>
+        ))}
+        {!groups.length && <p className="hint">No shape matches “{query}”. Try a different word, or choose All.</p>}
+      </div>
+      <p className="hint lib-foot">
+        {coarse
+          ? 'Tap a shape, then tap or drag on the sheet. To turn a door or furniture, select it and use ROTATE in the inspector.'
+          : 'Click a shape, then click or drag on the sheet. You can also drag a shape onto the sheet. Doors and furniture rotate with ⇧R and flip with ⇧H.'}
+      </p>
+    </aside>
   );
 }
 
@@ -175,7 +251,8 @@ export function Inspector({ nodes, edges, nodeById, fmt, setNode, setEdge, act }
         <footer>
           <button type="button" className="act" onClick={act.front}>TO FRONT</button>
           <button type="button" className="act" onClick={act.back}>TO BACK</button>
-          {n.type === 'door' && <button type="button" className="act wide" onClick={act.flip}>FLIP SWING</button>}
+          {TURN[n.type] && <button type="button" className="act" title="Rotate 90° clockwise (⇧R)" onClick={act.rotate}>ROTATE 90°</button>}
+          {TURN[n.type] && <button type="button" className="act" title="Mirror left to right (⇧H)" onClick={act.flip}>FLIP</button>}
           <button type="button" className="act" onClick={act.dup}>DUPLICATE</button>
           <button type="button" className="act danger" onClick={act.del}>DELETE</button>
         </footer>
@@ -224,6 +301,8 @@ export function Inspector({ nodes, edges, nodeById, fmt, setNode, setEdge, act }
         </div>
       </section>
       <footer>
+        {nodes.some(n => TURN[n.type]) && <button type="button" className="act" title="Rotate the doors and furniture 90° (⇧R)" onClick={act.rotate}>ROTATE 90°</button>}
+        {nodes.some(n => TURN[n.type]) && <button type="button" className="act" title="Mirror the doors and furniture (⇧H)" onClick={act.flip}>FLIP</button>}
         {nodes.length > 0 && <button type="button" className="act wide" onClick={act.wrap}>WRAP IN ZONE</button>}
         {nodes.length > 0 && <button type="button" className="act" onClick={act.dup}>DUPLICATE</button>}
         <button type="button" className={cx('act danger', !nodes.length && 'wide')} onClick={act.del}>DELETE</button>
@@ -239,6 +318,7 @@ const KEYMAP = [
   ['Double-click', 'Edit label · new text'], ['Esc', 'Cancel · clear selection'],
   [`${MOD}Z · ${MOD}${KSHIFT}Z`, 'Undo · redo'], [`${MOD}C · X · V`, 'Copy · cut · paste'],
   [`${MOD}D`, 'Duplicate'], [`${MOD}A`, 'Select all'], [`${MOD}G`, 'Wrap selection in zone'],
+  ['/', 'Library: doors, furniture and more'], [`${KSHIFT}R · ${KSHIFT}H`, 'Rotate · flip doors and furniture'],
   [`${MOD}S`, 'Save now'], [`${MOD}O`, 'Open a JSON file'], ['?', 'Show this list'],
   ['Delete', 'Remove selection'], ['Arrows', 'Nudge · shift = one square'], ['Scroll', 'Pan'],
   [`${MOD}Scroll · + −`, 'Zoom'], [`${KSHIFT}1 · ${KSHIFT}0`, 'Fit · 100%'], ['Alt drag', 'Move without guides']
