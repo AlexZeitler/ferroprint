@@ -1,13 +1,16 @@
 // Editor chrome: the sheet frame, toolbars, inspector, panels, title block and status bar.
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
-import { TYPE_NAME, TOOL_NAMES, KEY_OF, LABELLESS, NOFILL, NOLINE, TURN, trunc, toolName, nodeTitle, nodeMeta } from './engine.js';
+import { TYPE_NAME, TOOL_NAMES, KEY_OF, LABELLESS, NOFILL, NOLINE, TURN, trunc, toolName, nodeTitle, nodeMeta, bounds } from './engine.js';
+import { renderNode, renderEdge } from './draw.jsx';
+import { TEMPLATES } from './templates.js';
 import { ICONS, PALETTE, LIBRARY_ICON, PIN_ICON } from './icons.jsx';
 import { CATEGORIES, ToolIcon } from './library.jsx';
-import { PROVIDERS, PROVIDER_NAME, loadCloud, onCloudLoad, cloudSet, cloudFailed } from './cloud.js';
+import { PROVIDERS, PROVIDER_NAME, FRAMES, loadCloud, onCloudLoad, cloudSet, cloudFailed } from './cloud.js';
 
 const IS_MAC = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 export const MOD = IS_MAC ? '⌘' : 'Ctrl ';
 const SHIFT = IS_MAC ? '⇧' : 'Shift ';
+const ALT = IS_MAC ? '⌥' : 'Alt ';
 const KSHIFT = '⇧';
 
 const cx = (...c) => c.filter(Boolean).join(' ');
@@ -34,7 +37,7 @@ function Seg({ label, opts, value, onChange }) {
 }
 
 // Text field for numbers. It commits on Enter or blur, so partial input such as "-" is allowed.
-function NumField({ label, value, onCommit }) {
+function NumField({ label, value, onCommit, disabled }) {
   const [draft, setDraft] = useState(null);
   const cancel = useRef(false);
   const commit = () => {
@@ -58,7 +61,7 @@ function NumField({ label, value, onCommit }) {
   return (
     <label className="numfield">
       <span>{label}</span>
-      <input type="text" inputMode="decimal" spellCheck={false} value={draft ?? String(value)} onChange={e => setDraft(e.target.value)} onBlur={commit} onKeyDown={onKeyDown} />
+      <input type="text" inputMode="decimal" spellCheck={false} disabled={disabled} value={draft ?? String(value)} onChange={e => setDraft(e.target.value)} onBlur={commit} onKeyDown={onKeyDown} />
     </label>
   );
 }
@@ -106,8 +109,9 @@ export function TopBar({ barRef, save, canUndo, canRedo, snap, dims, mode, panel
         <Btn on={mode === 'white'} title="Whiteprint: blue lines on white paper" onClick={on.white}>White</Btn>
       </div>
       <div className="group">
-        <Btn title="Start a new, empty project" onClick={on.newDoc}>New</Btn>
+        <Btn on={panel === 'new'} title="A blank project, a blank sheet or a template" onClick={on.newDoc}>New</Btn>
         <Btn title={`Open a Ferroprint JSON file (${MOD}O)`} onClick={on.open}>Open</Btn>
+        <Btn on={panel === 'share'} title="Share this project with a link" onClick={on.share}>Share</Btn>
         <div className="group-label split">EXPORT</div>
         <Btn className="plain" title="Download this sheet as PNG" onClick={on.png}>PNG</Btn>
         <Btn className="plain" title="Download this sheet as SVG" onClick={on.svg}>SVG</Btn>
@@ -188,14 +192,15 @@ function librarySections(view, q, pins) {
   }));
   const cloud = PROVIDERS.filter(p => view === p.id || (view === 'all' && q.length >= 2)).flatMap(p => {
     const set = cloudSet(p.id);
-    if (!set) return [];
+    // Frames are zones with the provider's group icon. They come first in a provider's view.
+    const frames = ranked(FRAMES.filter(f => f.p === p.id).map(f => ({ id: `frame:${f.id}`, name: `${f.name} frame`, s: score(f.name, 'frame boundary group zone', view === 'all' ? p.name : '') })));
     const item = (k, g) => ({ id: `cloud:${p.id}/${k}`, name: set.icons[k].n, s: score(set.icons[k].n, g.n, view === 'all' ? p.name : '') });
     if (view === 'all') {
-      const seen = new Set(), all = ranked(set.groups.flatMap(g => g.i.filter(k => !seen.has(k) && seen.add(k)).map(k => item(k, g))));
+      const seen = new Set(), all = [...frames, ...(set ? ranked(set.groups.flatMap(g => g.i.filter(k => !seen.has(k) && seen.add(k)).map(k => item(k, g)))) : [])];
       const more = all.length > CLOUD_SEARCH_MAX ? ` · first ${CLOUD_SEARCH_MAX} of ${all.length}, open ${p.name} for all` : '';
       return [{ key: p.id, title: p.name + more, items: all.slice(0, CLOUD_SEARCH_MAX) }];
     }
-    return set.groups.map(g => ({ key: p.id + g.n, title: g.n, items: ranked(g.i.map(k => item(k, g))) }));
+    return [{ key: p.id + ':frames', title: 'Frames', items: frames }, ...(set ? set.groups.map(g => ({ key: p.id + g.n, title: g.n, items: ranked(g.i.map(k => item(k, g))) })) : [])];
   });
   return [...base, ...cloud].filter(sec => sec.items.length);
 }
@@ -290,9 +295,23 @@ export const LibraryPanel = memo(function LibraryPanel({ tool, theme, pins, onPi
 
 const SOLID = [[false, 'Solid'], [true, 'Dashed']];
 
+const SIDE_OPTS = [['auto', 'Auto'], ['top', '↑'], ['right', '→'], ['bottom', '↓'], ['left', '←']];
+
+// Action buttons in two columns. An odd last button takes the full row.
+function Acts({ list }) {
+  const shown = list.filter(Boolean);
+  return (
+    <footer>
+      {shown.map(([label, fn, extra = {}], i) => (
+        <button type="button" key={label} className={cx('act', extra.danger && 'danger', (extra.wide || (i === shown.length - 1 && shown.length % 2)) && 'wide')} title={extra.title} disabled={extra.disabled} onClick={fn}>{label}</button>
+      ))}
+    </footer>
+  );
+}
+
 export function Inspector({ nodes, edges, nodeById, fmt, setNode, setEdge, act }) {
   if (nodes.length === 1 && !edges.length) {
-    const n = nodes[0], id = n.id;
+    const n = nodes[0], id = n.id, locked = !!n.locked;
     const set = (patch, key) => setNode(id, patch, key);
     return (
       <aside className="panel inspector" aria-label="Inspector">
@@ -306,10 +325,10 @@ export function Inspector({ nodes, edges, nodeById, fmt, setNode, setEdge, act }
           </section>
         )}
         <section>
-          <div className="caption">POSITION · SIZE (PX)</div>
+          <div className="caption">POSITION · SIZE (PX){locked ? ' · LOCKED' : ''}</div>
           <div className="geom">
             {['x', 'y', 'w', 'h'].map(f => (
-              <NumField key={id + f} label={f.toUpperCase()} value={Math.round(n[f])} onCommit={v => set({ [f]: f === 'w' || f === 'h' ? Math.max(1, v) : v }, 'geo' + f + id)} />
+              <NumField key={id + f} label={f.toUpperCase()} value={Math.round(n[f])} disabled={locked} onCommit={v => set({ [f]: f === 'w' || f === 'h' ? Math.max(1, v) : v }, 'geo' + f + id)} />
             ))}
           </div>
         </section>
@@ -319,24 +338,26 @@ export function Inspector({ nodes, edges, nodeById, fmt, setNode, setEdge, act }
           {!LABELLESS[n.type] && <Seg label="TEXT" opts={[['s', 'S'], ['m', 'M'], ['l', 'L']]} value={n.size || 'm'} onChange={v => set({ size: v })} />}
           {(n.type === 'path' || n.type === 'line') && <Seg label="WEIGHT" opts={[['s', 'Fine'], ['m', 'Medium'], ['l', 'Wall']]} value={n.weight || 'm'} onChange={v => set({ weight: v })} />}
         </section>
-        <footer>
-          <button type="button" className="act" onClick={act.front}>TO FRONT</button>
-          <button type="button" className="act" onClick={act.back}>TO BACK</button>
-          {TURN[n.type] && <button type="button" className="act" title="Rotate 90° clockwise (⇧R)" onClick={act.rotate}>ROTATE 90°</button>}
-          {TURN[n.type] && <button type="button" className="act" title="Mirror left to right (⇧H)" onClick={act.flip}>FLIP</button>}
-          <button type="button" className="act" onClick={act.dup}>DUPLICATE</button>
-          <button type="button" className="act danger" onClick={act.del}>DELETE</button>
-        </footer>
+        <Acts list={[
+          ['TO FRONT', act.front], ['TO BACK', act.back],
+          TURN[n.type] && !locked && ['ROTATE 90°', act.rotate, { title: 'Rotate 90° clockwise (⇧R)' }],
+          TURN[n.type] && !locked && ['FLIP', act.flip, { title: 'Mirror left to right (⇧H)' }],
+          [locked ? 'UNLOCK' : 'LOCK', act.lock, { title: `${locked ? 'Unlock' : 'Lock'} the shape (${KSHIFT}${MOD}L)` }],
+          ['DUPLICATE', act.dup],
+          n.group && ['UNGROUP', act.ungroup, { title: `Ungroup the shapes (${KSHIFT}${MOD}G)` }],
+          n.type === 'zone' && n.icon && ['REMOVE ICON', act.noIcon, { title: 'Remove the frame icon from the tab' }],
+          ['DELETE', act.del, { danger: true, disabled: locked, title: locked ? 'Unlock the shape to delete it' : undefined }]
+        ]} />
       </aside>
     );
   }
   if (edges.length === 1 && !nodes.length) {
-    const e = edges[0], id = e.id;
+    const e = edges[0], id = e.id, bends = e.pts ? e.pts.length : 0;
     const set = (patch, key) => setEdge(id, patch, key);
     const nm = n => (n ? trunc(String(n.label || TYPE_NAME[n.type] || '').toUpperCase(), 16) : '?');
     return (
       <aside className="panel inspector" aria-label="Inspector">
-        <header><h2>Connector</h2><span>{e.route}</span></header>
+        <header><h2>Connector</h2><span>{e.route}{bends ? ` · ${bends} ${bends === 1 ? 'bend' : 'bends'}` : ''}</span></header>
         <section>
           <div className="caption">LABEL</div>
           <textarea rows={2} value={e.label} onChange={ev => set({ label: ev.target.value }, 'el' + id)} />
@@ -346,19 +367,25 @@ export function Inspector({ nodes, edges, nodeById, fmt, setNode, setEdge, act }
           <Seg label="ROUTE" opts={[['elbow', 'Elbow'], ['straight', 'Straight'], ['curve', 'Curve']]} value={e.route} onChange={v => set({ route: v })} />
           <Seg label="ARROW" opts={[['none', 'None'], ['end', 'End'], ['both', 'Both']]} value={e.arrow} onChange={v => set({ arrow: v })} />
           <Seg label="LINE" opts={SOLID} value={!!e.dashed} onChange={v => set({ dashed: v })} />
+          <Seg label="FROM" opts={SIDE_OPTS} value={e.fromSide || 'auto'} onChange={v => act.sides({ fromSide: v })} />
+          <Seg label="TO" opts={SIDE_OPTS} value={e.toSide || 'auto'} onChange={v => act.sides({ toSide: v })} />
+          <p className="hint tight">Drag the round handle on the line to add a bend. Double-click a square bend to remove it.</p>
         </section>
-        <footer>
-          <button type="button" className="act wide" onClick={act.reverse}>REVERSE DIRECTION</button>
-          <button type="button" className="act danger wide" onClick={act.del}>DELETE</button>
-        </footer>
+        <Acts list={[
+          ['REVERSE DIRECTION', act.reverse, { wide: true }],
+          bends > 0 && ['STRAIGHTEN', act.straighten, { wide: true, title: 'Remove all bends' }],
+          ['DELETE', act.del, { danger: true, wide: true }]
+        ]} />
       </aside>
     );
   }
   const count = nodes.length + edges.length;
   if (count < 2) return null;
+  const groups = new Set(nodes.map(n => n.group).filter(Boolean)), oneGroup = groups.size === 1 && nodes.every(n => n.group);
+  const allLocked = nodes.length > 0 && nodes.every(n => n.locked);
   return (
     <aside className="panel inspector" aria-label="Inspector">
-      <header><h2>Selection</h2><span>{count} items</span></header>
+      <header><h2>{oneGroup ? 'Group' : 'Selection'}</h2><span>{count} items</span></header>
       <section>
         <div className="caption">ALIGN</div>
         <div className="grid3">
@@ -371,13 +398,16 @@ export function Inspector({ nodes, edges, nodeById, fmt, setNode, setEdge, act }
           <button type="button" className="act small" disabled={nodes.length < 3} title="Space three or more shapes evenly from top to bottom" onClick={() => act.distribute('y')}>SPACE DOWN</button>
         </div>
       </section>
-      <footer>
-        {nodes.some(n => TURN[n.type]) && <button type="button" className="act" title="Rotate the doors and furniture 90° (⇧R)" onClick={act.rotate}>ROTATE 90°</button>}
-        {nodes.some(n => TURN[n.type]) && <button type="button" className="act" title="Mirror the doors and furniture (⇧H)" onClick={act.flip}>FLIP</button>}
-        {nodes.length > 0 && <button type="button" className="act wide" onClick={act.wrap}>WRAP IN ZONE</button>}
-        {nodes.length > 0 && <button type="button" className="act" onClick={act.dup}>DUPLICATE</button>}
-        <button type="button" className={cx('act danger', !nodes.length && 'wide')} onClick={act.del}>DELETE</button>
-      </footer>
+      <Acts list={[
+        nodes.length > 1 && !oneGroup && ['GROUP', act.group, { title: `Group the shapes (${MOD}G)` }],
+        groups.size > 0 && ['UNGROUP', act.ungroup, { title: `Ungroup the shapes (${KSHIFT}${MOD}G)` }],
+        nodes.length > 0 && [allLocked ? 'UNLOCK' : 'LOCK', act.lock, { title: `${allLocked ? 'Unlock' : 'Lock'} the shapes (${KSHIFT}${MOD}L)` }],
+        nodes.some(n => TURN[n.type]) && ['ROTATE 90°', act.rotate, { title: 'Rotate the doors and furniture 90° (⇧R)' }],
+        nodes.some(n => TURN[n.type]) && ['FLIP', act.flip, { title: 'Mirror the doors and furniture (⇧H)' }],
+        nodes.length > 0 && ['WRAP IN ZONE', act.wrap, { title: `Draw a zone around the shapes (${ALT}${MOD}G)` }],
+        nodes.length > 0 && ['DUPLICATE', act.dup],
+        ['DELETE', act.del, { danger: true }]
+      ]} />
     </aside>
   );
 }
@@ -388,7 +418,9 @@ const KEYMAP = [
   ['W O I M', 'Window · button · input · image'], ['N T', 'Note · text'], ['Enter', 'Edit label'],
   ['Double-click', 'Edit label · new text'], ['Esc', 'Cancel · clear selection'],
   [`${MOD}Z · ${MOD}${KSHIFT}Z`, 'Undo · redo'], [`${MOD}C · X · V`, 'Copy · cut · paste'],
-  [`${MOD}D`, 'Duplicate'], [`${MOD}A`, 'Select all'], [`${MOD}G`, 'Wrap selection in zone'],
+  [`${MOD}D`, 'Duplicate'], [`${MOD}A`, 'Select all'], [`${MOD}G · ${KSHIFT}${MOD}G`, 'Group · ungroup'],
+  [`${ALT}${MOD}G`, 'Wrap selection in zone'], [`${KSHIFT}${MOD}L`, 'Lock · unlock'], [`${MOD}click`, 'Select one shape in a group'],
+  ['Drag a connector', 'Add a bend · double-click a bend to remove it'],
   ['/', 'Library: shapes and cloud icons'], [`${KSHIFT}R · ${KSHIFT}H`, 'Rotate · flip doors and furniture'],
   [`${MOD}S`, 'Save now'], [`${MOD}O`, 'Open a JSON file'], ['?', 'Show this list'],
   ['Delete', 'Remove selection'], ['Arrows', 'Nudge · shift = one square'], ['Scroll', 'Pan'],
@@ -417,6 +449,98 @@ export function SetupPanel({ settings, onSet, onClose }) {
         <Seg label="ROUTE" opts={[['elbow', 'Elbow'], ['straight', 'Straight'], ['curve', 'Curve']]} value={settings.route} onChange={v => onSet({ route: v })} />
       </section>
       <p className="hint">These settings apply to the whole project and travel with the JSON file. Route sets the shape of new connectors. On a sheet drawn in FT or M, one grid square is 1 ft or 0.5 m.</p>
+    </aside>
+  );
+}
+
+// A small drawing of a template sheet. Cloud icons appear when their set has loaded.
+function TemplatePreview({ sheet, ctx }) {
+  const b = bounds(sheet.nodes) || { x: 0, y: 0, w: 100, h: 60 }, pad = 30;
+  const map = Object.fromEntries(sheet.nodes.map(n => [n.id, n]));
+  const c = { ...ctx, unit: sheet.unit };
+  return (
+    <svg className="tpreview" viewBox={`${b.x - pad} ${b.y - pad} ${b.w + 2 * pad} ${b.h + 2 * pad}`} preserveAspectRatio="xMidYMid meet" aria-hidden="true">
+      {sheet.nodes.filter(n => n.type === 'zone').map(n => renderNode(n, c))}
+      {sheet.edges.map(e => renderEdge(e, map, c, false))}
+      {sheet.nodes.filter(n => n.type !== 'zone').map(n => renderNode(n, c))}
+    </svg>
+  );
+}
+
+export const NewPanel = memo(function NewPanel({ theme, letter, caps, grid, on }) {
+  const [, setGen] = useState(0);
+  const sheets = useMemo(() => Object.fromEntries(TEMPLATES.map(tp => [tp.id, tp.sheet()])), []);
+  useEffect(() => onCloudLoad(() => setGen(g => g + 1)), []);
+  useEffect(() => { [...new Set(TEMPLATES.flatMap(tp => tp.clouds))].forEach(id => loadCloud(id).catch(() => {})); }, []);
+  const ctx = { t: theme, L: letter, caps, g: grid };
+  return (
+    <aside className="panel float new-panel" aria-label="New">
+      <header><h2>NEW</h2><button type="button" className="close" onClick={on.close}>CLOSE</button></header>
+      <div className="new-body">
+        <div className="caption">START</div>
+        <div className="grid2">
+          <button type="button" className="act" onClick={on.blankSheet}>BLANK SHEET</button>
+          <button type="button" className="act" onClick={on.blankDoc}>BLANK PROJECT</button>
+        </div>
+        <p className="hint tight">A blank sheet joins this project. A blank project replaces this project, and the message after it has an UNDO button.</p>
+        <div className="caption">TEMPLATES · EACH ONE ADDS A SHEET</div>
+        <div className="templates">
+          {TEMPLATES.map(tp => (
+            <button type="button" className="template" key={tp.id} onClick={() => on.add(tp.id)}>
+              <TemplatePreview sheet={sheets[tp.id]} ctx={ctx} />
+              <span className="tname">{tp.name}</span>
+              <span className="tdesc">{tp.desc}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+    </aside>
+  );
+});
+
+export function SharePanel({ share, on }) {
+  const ref = useRef(null);
+  const url = share && share.url, kb = url ? Math.max(1, Math.round(url.length / 1024)) : 0;
+  const copy = () => {
+    if (!url) return;
+    const fail = () => { if (ref.current) { ref.current.focus(); ref.current.select(); } on.copied(false); };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(url).then(() => on.copied(true), fail);
+    else fail();
+  };
+  return (
+    <aside className="panel float share-panel" aria-label="Share">
+      <header><h2>SHARE</h2><button type="button" className="close" onClick={on.close}>CLOSE</button></header>
+      <section>
+        <div className="caption">LINK TO THIS PROJECT</div>
+        {share && share.error ? (
+          <p className="hint tight">This browser could not make the link. Use Export JSON, and send the file.</p>
+        ) : (
+          <div className="share-row">
+            <input ref={ref} className="field" readOnly value={url || 'Making the link…'} onFocus={e => e.target.select()} aria-label="Share link" />
+            <button type="button" className="act" disabled={!url} onClick={copy}>COPY</button>
+          </div>
+        )}
+        <p className="hint tight">
+          The link holds the whole project, so no server stores it. Anyone with the link can open a copy. Changes that you make after you copy the link are not in it.
+          {url ? ` The link is ${kb} KB long.` : ''}
+          {url && url.length > 60000 ? ' Some chat apps cut long links. If the link does not open, send the JSON file.' : ''}
+        </p>
+      </section>
+    </aside>
+  );
+}
+
+export function IncomingPanel({ doc, on }) {
+  const n = doc.sheets.length, name = doc.meta.project || 'an untitled project';
+  return (
+    <aside className="panel float incoming" aria-label="Shared project">
+      <header><h2>SHARED PROJECT</h2></header>
+      <section>
+        <p className="lead">The link holds {name}, with {n} {n === 1 ? 'sheet' : 'sheets'}. Your own project stays unless you replace it.</p>
+        <button type="button" className="act" onClick={on.add}>ADD ITS SHEETS TO MY PROJECT</button>
+        <button type="button" className="act" onClick={on.replace}>REPLACE MY PROJECT</button>
+        <button type="button" className="act" onClick={on.cancel}>CANCEL</button>
+      </section>
     </aside>
   );
 }

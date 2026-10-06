@@ -3,17 +3,22 @@ import { flushSync } from 'react-dom';
 import * as F from './engine.js';
 import { renderNode, renderEdge, renderDims } from './draw.jsx';
 import { SYMBOLS } from './library.jsx';
-import { loadCloud, onCloudLoad, cloudProvider, cloudSet, cloudFailed, isCloudKey } from './cloud.js';
-import { Frame, TopBar, Palette, Inspector, HelpPanel, SetupPanel, LibraryPanel, TitleBlock, StatusBar, Toast } from './chrome.jsx';
+import { loadCloud, onCloudLoad, cloudProvider, cloudSet, cloudFailed, isCloudKey, FRAME } from './cloud.js';
+import { Frame, TopBar, Palette, Inspector, HelpPanel, SetupPanel, LibraryPanel, NewPanel, SharePanel, IncomingPanel, TitleBlock, StatusBar, Toast } from './chrome.jsx';
 import { DOC_KEY, loadDoc, parseDoc, saveDoc, loadUI, saveUI, storageAvailable } from './storage.js';
+import { shareLink, sharedPayload, readShared, clearShared } from './share.js';
+import { TEMPLATES } from './templates.js';
 
 const SAVE_DELAY = 400;
 const HISTORY_LIMIT = 150;
 const RECENT_MAX = 3;
 const PIN_MAX = 24;
 const PALETTE_TOOLS = new Set(['door']);
-// A tool that places a library shape: a symbol or a cloud icon.
-const isLibraryTool = id => typeof id === 'string' && (!!SYMBOLS[id] || (id.startsWith('cloud:') && isCloudKey(id.slice(6))));
+// A tool that places a library shape: a symbol, a cloud icon or a frame.
+const isLibraryTool = id => typeof id === 'string' && (!!SYMBOLS[id] || (id.startsWith('cloud:') && isCloudKey(id.slice(6))) || (id.startsWith('frame:') && !!FRAME[id.slice(6)]));
+// The cloud set that a library tool needs.
+const toolCloud = id => (id.startsWith('cloud:') ? cloudProvider(id.slice(6)) : id.startsWith('frame:') && FRAME[id.slice(6)] ? FRAME[id.slice(6)].p : null);
+const without = (o, key) => { const { [key]: _, ...rest } = o; return rest; };
 
 function textureFor(mode) {
   const [r, g, b] = F.THEMES[mode].tex;
@@ -33,11 +38,12 @@ export default class Editor extends Component {
       recent: Array.isArray(ui.recent) ? ui.recent.filter(isLibraryTool).slice(0, RECENT_MAX) : ['stairs', 'sofa', 'cloud'],
       pins: Array.isArray(ui.pins) ? ui.pins.filter(isLibraryTool).slice(0, PIN_MAX) : [], ghost: null,
       size: { w: 0, h: 0 }, cursor: { x: 0, y: 0 }, space: false, panning: false,
-      panel: null, toast: null, delArm: false, palTop: 92,
+      panel: null, toast: null, delArm: false, palTop: 92, share: null, incoming: null,
       win: { w: window.innerWidth, h: window.innerHeight },
       save: storageAvailable() ? 'saved' : 'off'
     };
     this._savedJSON = stored ? stored.json : null;
+    this._hadStored = !!stored;
     this.undoStack = []; this.redoStack = [];
     this.drag = null; this.clip = null; this.pasteN = 0;
     this.pointers = new Map();
@@ -45,9 +51,12 @@ export default class Editor extends Component {
     this.nodeCache = new WeakMap(); this.edgeCache = new WeakMap(); this.cloudGen = 0;
     this.barRef = createRef(); this.fileRef = createRef();
     this.canvasEl = null; this.contentEl = null;
-    ['onDown', 'onMove', 'onUp', 'onDbl', 'onWheel', 'onKey', 'onKeyUp', 'onResize', 'setCanvas', 'setContent', 'onFile', 'onBlurWin', 'onStorage', 'onHide'].forEach(k => { this[k] = this[k].bind(this); });
+    ['onDown', 'onMove', 'onUp', 'onDbl', 'onWheel', 'onKey', 'onKeyUp', 'onResize', 'setCanvas', 'setContent', 'onFile', 'onBlurWin', 'onStorage', 'onHide', 'onHash'].forEach(k => { this[k] = this[k].bind(this); });
     // Stable handlers let the library panel skip renders while the pointer moves.
     this.lib = { pick: id => this.pickSymbol(id), pin: id => this.togglePin(id), drag: (id, e) => this.startPlace(id, e), close: () => this.setState({ panel: null }) };
+    this.tpl = { add: id => this.addTemplate(id), blankDoc: () => { this.setState({ panel: null }); this.newDoc(); }, blankSheet: () => { this.setState({ panel: null }); this.addSheet(); }, close: this.lib.close };
+    this.shareUI = { copied: ok => this.flash(ok ? 'Link copied. Anyone with the link can open this project.' : 'Copy the selected link with Ctrl C.', 4000), close: () => this.setState({ panel: null, share: null }) };
+    this.inUI = { add: () => this.acceptShared('add'), replace: () => this.acceptShared('replace'), cancel: () => this.acceptShared('cancel') };
   }
 
   componentDidMount() {
@@ -61,6 +70,8 @@ export default class Editor extends Component {
     window.addEventListener('storage', this.onStorage);
     window.addEventListener('pagehide', this.onHide);
     document.addEventListener('visibilitychange', this.onHide);
+    window.addEventListener('hashchange', this.onHash);
+    this.checkShared();
     // A cloud set arrives after the first render, so the sheet draws again when one loads.
     this.offCloud = onCloudLoad(() => { this.cloudGen++; this.forceUpdate(); });
     this.persist();
@@ -81,6 +92,7 @@ export default class Editor extends Component {
     window.removeEventListener('storage', this.onStorage);
     window.removeEventListener('pagehide', this.onHide);
     document.removeEventListener('visibilitychange', this.onHide);
+    window.removeEventListener('hashchange', this.onHash);
     if (this.offCloud) this.offCloud();
     if (this._saveT) this.flushSave();
     [this._toastT, this._armT].forEach(clearTimeout);
@@ -105,8 +117,8 @@ export default class Editor extends Component {
   // Loads the cloud sets that the active sheet, the pins and the recent list use.
   cloudsInUse(nodes) {
     const need = new Set();
-    nodes.forEach(n => { if (n.type === 'cloud') need.add(cloudProvider(n.icon)); });
-    [...this.state.pins, ...this.state.recent].forEach(id => { if (id.startsWith('cloud:')) need.add(cloudProvider(id.slice(6))); });
+    nodes.forEach(n => { const p = F.nodeCloud(n); if (p) need.add(p); });
+    [...this.state.pins, ...this.state.recent].forEach(id => { const p = toolCloud(id); if (p) need.add(p); });
     return [...need];
   }
   ensureClouds() {
@@ -279,12 +291,19 @@ export default class Editor extends Component {
     const { tool, space } = this.state;
     try { this.canvasEl.setPointerCapture(e.pointerId); } catch { /* the pointer is already gone */ }
     if (e.button === 1 || tool === 'hand' || space) { e.preventDefault(); this.drag = { type: 'pan', cx: e.clientX, cy: e.clientY, v0: this.view() }; this.setState({ panning: true }); return; }
-    if (F.toolShape(tool)) { this.drag = { type: 'create', shape: tool, start: p }; return; }
+    if (F.toolShape(tool)) { this.drag = { type: 'create', shape: tool, start: p, zone: F.toolShape(tool).type === 'zone' }; return; }
     if (tool === 'pen') { this.drag = { type: 'pen', pts: [p] }; this.setState({ sel: [] }); return; }
     if (tool === 'line') { this.drag = { type: 'line', start: { x: this.sn(p.x), y: this.sn(p.y) } }; this.setState({ sel: [] }); return; }
     if (kind === 'port' || tool === 'connector') {
+      // A drag from a port fixes the side where the connector leaves the shape.
       const from = kind === 'port' || kind === 'node' ? id : this.hoverAt(p, null, true);
-      if (from) { this.drag = { type: 'connect', from }; this.setState({ temp: { from, p, target: null }, sel: [] }); }
+      const fromSide = kind === 'port' ? tg.getAttribute('data-side') : null;
+      if (from) { this.drag = { type: 'connect', from, fromSide }; this.setState({ temp: { from, fromSide, p, target: null }, sel: [] }); }
+      return;
+    }
+    if (kind === 'wp' || kind === 'wpadd') {
+      // A bend handle moves a bend. A handle between bends adds one when the drag starts.
+      this.drag = { type: kind, id, i: Number(tg.getAttribute('data-i')), start: p, moved: false };
       return;
     }
     if (kind === 'handle') {
@@ -294,9 +313,22 @@ export default class Editor extends Component {
       return;
     }
     if (kind === 'node') {
+      const n = this.sheet().nodes.find(q => q.id === id), deep = e.metaKey || e.ctrlKey;
+      // A locked shape lets the pointer through: a drag draws a selection box, and a click selects the shape.
+      if (n && n.locked && !deep) {
+        this.drag = { type: 'marquee', start: p, base: e.shiftKey ? this.state.sel : [], click: id, moved: false };
+        if (!e.shiftKey) this.setState({ sel: [] });
+        return;
+      }
+      // A click selects the whole group. With Ctrl or ⌘, it selects one shape inside the group.
+      const pick = deep ? [id] : this.expand([id]);
       let sel = this.state.sel;
-      if (e.shiftKey) { sel = sel.includes(id) ? sel.filter(x => x !== id) : [...sel, id]; this.setState({ sel }); if (!sel.includes(id)) return; }
-      else if (!sel.includes(id)) { sel = [id]; this.setState({ sel }); }
+      if (e.shiftKey) {
+        const had = pick.every(x => sel.includes(x));
+        sel = had ? sel.filter(x => !pick.includes(x)) : [...new Set([...sel, ...pick])];
+        this.setState({ sel });
+        if (had) return;
+      } else if (deep || !sel.includes(id)) { sel = pick; this.setState({ sel }); }
       this.startMove(p, sel);
       return;
     }
@@ -305,7 +337,7 @@ export default class Editor extends Component {
       this.setState({ sel });
       return;
     }
-    this.drag = { type: 'marquee', start: p, base: e.shiftKey ? this.state.sel : [] };
+    this.drag = { type: 'marquee', start: p, base: e.shiftKey ? this.state.sel : [], moved: false };
     if (!e.shiftKey) this.setState({ sel: [] });
   }
   // Two fingers on a touch screen pan and zoom the sheet. This cancels any drag the first finger began.
@@ -317,12 +349,32 @@ export default class Editor extends Component {
   }
   startMove(p, sel) {
     const s = this.sheet(), ids = new Set(sel), orig = {};
-    s.nodes.forEach(n => { if (ids.has(n.id)) orig[n.id] = { x: n.x, y: n.y }; });
-    // Moving a zone also moves the shapes inside it.
-    s.nodes.filter(z => z.type === 'zone' && ids.has(z.id)).forEach(z => s.nodes.forEach(n => { if (n.id !== z.id && !orig[n.id] && F.within(n, z)) orig[n.id] = { x: n.x, y: n.y }; }));
+    s.nodes.forEach(n => { if (ids.has(n.id) && !n.locked) orig[n.id] = { x: n.x, y: n.y }; });
+    // Moving a zone also moves the shapes inside it. Locked shapes stay.
+    s.nodes.filter(z => z.type === 'zone' && orig[z.id]).forEach(z => s.nodes.forEach(n => { if (n.id !== z.id && !orig[n.id] && !n.locked && F.within(n, z)) orig[n.id] = { x: n.x, y: n.y }; }));
     const moving = s.nodes.filter(n => orig[n.id]);
     if (!moving.length) return;
-    this.drag = { type: 'move', start: p, orig, ob: F.plainBounds(moving), others: s.nodes.filter(n => !orig[n.id]).map(n => ({ x: n.x, y: n.y, w: n.w, h: n.h })), moved: false };
+    // The bends of a connector move with it when both of its shapes move.
+    const ePts = {};
+    s.edges.forEach(x => { if (x.pts && orig[x.from] && orig[x.to]) ePts[x.id] = x.pts; });
+    this.drag = { type: 'move', start: p, orig, ePts, ob: F.plainBounds(moving), others: s.nodes.filter(n => !orig[n.id]).map(n => ({ x: n.x, y: n.y, w: n.w, h: n.h })), moved: false };
+  }
+  // The selection with every shape of each selected group.
+  expand(ids) {
+    const s = this.sheet(), set = new Set(ids), groups = new Set();
+    s.nodes.forEach(n => { if (set.has(n.id) && n.group) groups.add(n.group); });
+    if (groups.size) s.nodes.forEach(n => { if (n.group && groups.has(n.group)) set.add(n.id); });
+    return [...set];
+  }
+  // The side whose port is under the pointer, while a connector is drawn onto a shape.
+  portAt(id, p) {
+    const n = this.sheet().nodes.find(q => q.id === id), k = this.view().k;
+    if (!n) return null;
+    const hit = ['top', 'right', 'bottom', 'left'].find(sd => {
+      const q = F.sidePt(n, sd), o = F.NORM[sd];
+      return Math.hypot(p.x - q.x, p.y - q.y) <= 12 / k || Math.hypot(p.x - (q.x + o.x * 14 / k), p.y - (q.y + o.y * 14 / k)) <= 10 / k;
+    });
+    return hit || null;
   }
   onMove(e) {
     if (this.pointers.has(e.pointerId)) this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -367,7 +419,7 @@ export default class Editor extends Component {
         this.pushHistory();
         const n = F.newNode(d.shape, r);
         d.id = n.id;
-        this.setNodes(ns => (d.shape === 'zone' ? [n, ...ns] : [...ns, n]));
+        this.setNodes(ns => (d.zone ? [n, ...ns] : [...ns, n]));
         st.sel = [n.id];
       } else {
         const id = d.id;
@@ -391,8 +443,11 @@ export default class Editor extends Component {
       if (bx) guides.push({ x1: bx.v, x2: bx.v, y1: Math.min(bx.o.y, ny) - 16, y2: Math.max(bx.o.y + bx.o.h, ny + ob.h) + 16 });
       if (by) guides.push({ y1: by.v, y2: by.v, x1: Math.min(by.o.x, nx) - 16, x2: Math.max(by.o.x + by.o.w, nx + ob.w) + 16 });
       dx = nx - ob.x; dy = ny - ob.y;
-      const orig = d.orig;
-      this.setNodes(ns => ns.map(n => (orig[n.id] ? { ...n, x: orig[n.id].x + dx, y: orig[n.id].y + dy } : n)));
+      const orig = d.orig, ePts = d.ePts, bends = Object.keys(ePts).length > 0;
+      this.updSheet(sh => ({
+        nodes: sh.nodes.map(n => (orig[n.id] ? { ...n, x: orig[n.id].x + dx, y: orig[n.id].y + dy } : n)),
+        edges: bends ? sh.edges.map(x => (ePts[x.id] ? { ...x, pts: F.shiftPts(ePts[x.id], dx, dy) } : x)) : sh.edges
+      }));
       st.guides = guides;
     } else if (d.type === 'resize') {
       const o = d.orig, hd = d.handle, id = o.id;
@@ -412,10 +467,27 @@ export default class Editor extends Component {
         this.setNodes(ns => ns.map(n => (n.id === id ? { ...n, x: x0, y: y0, w: x1 - x0, h: y1 - y0 } : n)));
       }
     } else if (d.type === 'connect') {
-      st.temp = { from: d.from, p, target: this.hoverAt(p, d.from, true) };
+      // The target area reaches past the box, so the pointer can reach the ports around it.
+      const target = this.hoverAt(p, d.from, false);
+      st.temp = { from: d.from, fromSide: d.fromSide, p, target, toSide: target ? this.portAt(target, p) : null };
+    } else if (d.type === 'wp' || d.type === 'wpadd') {
+      if (!d.moved) {
+        if (Math.hypot(p.x - d.start.x, p.y - d.start.y) * k < 3) { this.setState(st); return; }
+        d.moved = true;
+        this.pushHistory();
+        if (d.type === 'wpadd') {
+          const id = d.id, i = d.i;
+          this.setEdges(es => es.map(x => (x.id === id ? { ...x, pts: [...(x.pts || []).slice(0, i), { x: p.x, y: p.y }, ...(x.pts || []).slice(i)] } : x)));
+          d.type = 'wp';
+        }
+      }
+      // Alt places the bend off the grid.
+      const q = e.altKey ? { x: Math.round(p.x), y: Math.round(p.y) } : { x: this.sn(p.x), y: this.sn(p.y) }, id = d.id, i = d.i;
+      this.setEdges(es => es.map(x => (x.id === id && x.pts ? { ...x, pts: x.pts.map((w, j) => (j === i ? q : w)) } : x)));
     } else if (d.type === 'marquee') {
       const r = F.rectFrom(d.start, p), s = this.sheet();
-      const ids = s.nodes.filter(n => (n.type === 'zone' ? F.within(n, r) : F.inter(r, F.hitBox(n)))).map(n => n.id);
+      if (Math.hypot(p.x - d.start.x, p.y - d.start.y) * k > 3) d.moved = true;
+      const ids = this.expand(s.nodes.filter(n => !n.locked && (n.type === 'zone' ? F.within(n, r) : F.inter(r, F.hitBox(n)))).map(n => n.id));
       const set = new Set([...d.base, ...ids]);
       s.edges.forEach(ed => { if (ids.includes(ed.from) && ids.includes(ed.to)) set.add(ed.id); });
       st.sel = [...set]; st.marquee = r;
@@ -444,7 +516,7 @@ export default class Editor extends Component {
       if (d.started && e.type !== 'pointercancel' && over && this.canvasEl.contains(over)) {
         const n = F.newNode(d.shape, this.placeRect(d.shape, p));
         this.pushHistory();
-        this.setNodes(ns => [...ns, n]);
+        this.setNodes(ns => (n.type === 'zone' ? [n, ...ns] : [...ns, n]));
         Object.assign(st, { sel: [n.id], tool: 'select', recent: this.withRecent(d.shape) });
       }
     } else if (d.type === 'pan') st.panning = false;
@@ -454,21 +526,27 @@ export default class Editor extends Component {
         this.pushHistory();
         const n = F.newNode(d.shape, this.placeRect(d.shape, d.start));
         d.id = n.id;
-        this.setNodes(ns => (d.shape === 'zone' ? [n, ...ns] : [...ns, n]));
+        this.setNodes(ns => (d.zone ? [n, ...ns] : [...ns, n]));
       }
       st.sel = [d.id]; st.tool = 'select';
       if (d.shape === 'text' || d.shape === 'note') st.editing = { kind: 'node', id: d.id, value: F.SHAPES[d.shape].label };
     } else if (d.type === 'connect') {
-      const target = e.type === 'pointercancel' ? null : this.hoverAt(p, d.from, true);
+      const target = e.type === 'pointercancel' ? null : this.hoverAt(p, d.from, false);
       if (target) {
         this.pushHistory();
         const ed = { id: F.uid(), from: d.from, to: target, label: '', route: this.defRoute(), arrow: 'end', dashed: false };
+        const toSide = this.portAt(target, p);
+        if (d.fromSide) ed.fromSide = d.fromSide;
+        if (toSide) ed.toSide = toSide;
         this.setEdges(es => [...es, ed]);
         st.sel = [ed.id];
       }
       st.temp = null; st.tool = 'select';
     } else if (d.type === 'move') st.guides = [];
-    else if (d.type === 'marquee') st.marquee = null;
+    else if (d.type === 'marquee') {
+      st.marquee = null;
+      if (!d.moved && d.click) st.sel = this.expand([d.click]);
+    }
     else if (d.type === 'pen') {
       if (d.pts.length > 1) {
         this.pushHistory();
@@ -501,7 +579,8 @@ export default class Editor extends Component {
   }
   onDbl(e) {
     if (Date.now() - (this._touchDblAt || 0) < 700) return;
-    this.handleDouble(e.target, e.clientX, e.clientY);
+    // The canvas captures the pointer on press, so the event target is the canvas. Use the element under the pointer.
+    this.handleDouble(document.elementFromPoint(e.clientX, e.clientY), e.clientX, e.clientY);
   }
   handleDouble(target, clientX, clientY) {
     if (this.state.tool !== 'select') return;
@@ -512,7 +591,17 @@ export default class Editor extends Component {
       if (n && !F.LABELLESS[n.type]) this.startEdit('node', id);
       return;
     }
-    if (kind === 'edge') { this.startEdit('edge', id); return; }
+    if (kind === 'wp' && id) {
+      const i = Number(tg.getAttribute('data-i'));
+      this.pushHistory();
+      this.setEdges(es => es.map(x => {
+        if (x.id !== id || !x.pts) return x;
+        const pts = x.pts.filter((_, j) => j !== i);
+        return pts.length ? { ...x, pts } : without(x, 'pts');
+      }));
+      return;
+    }
+    if (kind === 'edge' || kind === 'wpadd') { this.startEdit('edge', id); return; }
     if (!kind) {
       if (!target || !this.canvasEl.contains(target)) return;
       const p = this.toWorld(clientX, clientY);
@@ -557,8 +646,12 @@ export default class Editor extends Component {
 
   // ---------- commands
   del() {
-    const ids = new Set(this.state.sel);
-    if (!ids.size) return;
+    const locked = new Set(this.sheet().nodes.filter(n => n.locked).map(n => n.id));
+    const ids = new Set(this.state.sel.filter(id => !locked.has(id)));
+    if (!ids.size) {
+      if (this.state.sel.length) this.flash('A locked shape cannot be deleted. Unlock it first.', 3000);
+      return;
+    }
     this.pushHistory();
     this.updSheet(s => ({ nodes: s.nodes.filter(n => !ids.has(n.id)), edges: s.edges.filter(e => !ids.has(e.id) && !ids.has(e.from) && !ids.has(e.to)) }));
     this.setState({ sel: [] });
@@ -574,9 +667,15 @@ export default class Editor extends Component {
   paste() {
     if (!this.clip) return;
     this.pasteN++;
-    const off = this.g() * this.pasteN, map = {};
-    const nodes = this.clip.nodes.map(n => { const id = F.uid(); map[n.id] = id; return { ...n, id, x: n.x + off, y: n.y + off }; });
-    const edges = this.clip.edges.map(e => ({ ...e, id: F.uid(), from: map[e.from], to: map[e.to] }));
+    // A pasted group becomes a new group. Pasted shapes are not locked, so they can move into place.
+    const off = this.g() * this.pasteN, map = {}, groups = {};
+    const nodes = this.clip.nodes.map(n => {
+      const id = F.uid(), c = without({ ...n, id, x: n.x + off, y: n.y + off }, 'locked');
+      map[n.id] = id;
+      if (n.group) c.group = groups[n.group] || (groups[n.group] = F.uid());
+      return c;
+    });
+    const edges = this.clip.edges.map(e => ({ ...e, id: F.uid(), from: map[e.from], to: map[e.to], ...(e.pts ? { pts: F.shiftPts(e.pts, off, off) } : {}) }));
     this.pushHistory();
     this.updSheet(s => ({ nodes: [...s.nodes, ...nodes], edges: [...s.edges, ...edges] }));
     this.setState({ sel: [...nodes.map(n => n.id), ...edges.map(e => e.id)] });
@@ -593,7 +692,7 @@ export default class Editor extends Component {
     this.setState({ sel: [z.id] });
   }
   align(kind) {
-    const s = this.sheet(), ids = new Set(this.state.sel), ns = s.nodes.filter(n => ids.has(n.id));
+    const s = this.sheet(), ids = new Set(this.state.sel), ns = s.nodes.filter(n => ids.has(n.id) && !n.locked);
     if (ns.length < 2) return;
     const b = F.plainBounds(ns);
     const fn = {
@@ -601,10 +700,10 @@ export default class Editor extends Component {
       top: () => ({ y: b.y }), middle: n => ({ y: Math.round(b.y + b.h / 2 - n.h / 2) }), bottom: n => ({ y: b.y + b.h - n.h })
     }[kind];
     this.pushHistory();
-    this.setNodes(a => a.map(n => (ids.has(n.id) ? { ...n, ...fn(n) } : n)));
+    this.setNodes(a => a.map(n => (ids.has(n.id) && !n.locked ? { ...n, ...fn(n) } : n)));
   }
   distribute(axis) {
-    const s = this.sheet(), ids = new Set(this.state.sel), ns = s.nodes.filter(n => ids.has(n.id));
+    const s = this.sheet(), ids = new Set(this.state.sel), ns = s.nodes.filter(n => ids.has(n.id) && !n.locked);
     if (ns.length < 3) return;
     const P = axis === 'x' ? 'x' : 'y', S = axis === 'x' ? 'w' : 'h';
     const sorted = ns.slice().sort((a, b) => a[P] - b[P]);
@@ -643,10 +742,43 @@ export default class Editor extends Component {
   startPlace(id, e) { this.drag = { type: 'place', shape: id, sx: e.clientX, sy: e.clientY, started: false }; }
   turnSelection(fn) {
     const ids = new Set(this.state.sel), s = this.sheet();
-    if (!s.nodes.some(n => ids.has(n.id) && F.TURN[n.type])) return;
+    const turns = n => ids.has(n.id) && F.TURN[n.type] && !n.locked;
+    if (!s.nodes.some(turns)) return;
     this.pushHistory();
-    this.setNodes(a => a.map(n => (ids.has(n.id) && F.TURN[n.type] ? fn(n) : n)));
+    this.setNodes(a => a.map(n => (turns(n) ? fn(n) : n)));
   }
+  groupSel() {
+    const ids = new Set(this.state.sel), ns = this.sheet().nodes.filter(n => ids.has(n.id));
+    if (ns.length < 2) { this.flash('Select two or more shapes to group them.', 3000); return; }
+    const gid = F.uid();
+    this.pushHistory();
+    this.setNodes(a => a.map(n => (ids.has(n.id) ? { ...n, group: gid } : n)));
+  }
+  ungroupSel() {
+    const ids = new Set(this.state.sel), groups = new Set(this.sheet().nodes.filter(n => ids.has(n.id) && n.group).map(n => n.group));
+    if (!groups.size) return;
+    this.pushHistory();
+    this.setNodes(a => a.map(n => (n.group && groups.has(n.group) ? without(n, 'group') : n)));
+  }
+  // Locks the selection, or unlocks it when every selected shape is locked.
+  lockSel() {
+    const ids = new Set(this.state.sel), ns = this.sheet().nodes.filter(n => ids.has(n.id));
+    if (!ns.length) return;
+    const lock = ns.some(n => !n.locked);
+    this.pushHistory();
+    this.setNodes(a => a.map(n => (ids.has(n.id) ? (lock ? { ...n, locked: true } : without(n, 'locked')) : n)));
+    this.flash(lock ? 'Locked. A locked shape does not move. Click it to select it again.' : 'Unlocked', 3000);
+  }
+  setEdgeSides(id, patch) {
+    this.pushHistory();
+    this.setEdges(a => a.map(x => {
+      if (x.id !== id) return x;
+      let y = { ...x, ...patch };
+      ['fromSide', 'toSide'].forEach(key => { if (y[key] === 'auto') y = without(y, key); });
+      return y;
+    }));
+  }
+  clearBends(id) { this.pushHistory(); this.setEdges(a => a.map(x => (x.id === id ? without(x, 'pts') : x))); }
   rotateSel() { this.turnSelection(F.rotateNode); }
   flipSel() { this.turnSelection(n => ({ ...n, flip: !n.flip })); }
   togglePanel(name) { this.setState(st => ({ panel: st.panel === name ? null : name })); }
@@ -667,14 +799,15 @@ export default class Editor extends Component {
       else if (k === 'x') { if (this.copy()) this.del(); }
       else if (k === 'v') { e.preventDefault(); this.paste(); }
       else if (k === 'd') { e.preventDefault(); this.duplicate(); }
-      else if (k === 'a') { e.preventDefault(); const s = this.sheet(); this.setState({ sel: [...s.nodes.map(n => n.id), ...s.edges.map(x => x.id)] }); }
-      else if (k === 'g') { e.preventDefault(); this.wrapZone(); }
+      else if (k === 'a') { e.preventDefault(); const s = this.sheet(); this.setState({ sel: [...s.nodes.filter(n => !n.locked).map(n => n.id), ...s.edges.map(x => x.id)] }); }
+      else if (e.code === 'KeyG') { e.preventDefault(); if (e.altKey) this.wrapZone(); else if (e.shiftKey) this.ungroupSel(); else this.groupSel(); }
+      else if (e.code === 'KeyL' && e.shiftKey) { e.preventDefault(); this.lockSel(); }
       return;
     }
     if (k === 'delete' || k === 'backspace') { if (this.state.sel.length) { e.preventDefault(); this.del(); } return; }
     if (k === 'escape') {
       this.drag = null;
-      this.setState({ sel: [], tool: 'select', panel: null, temp: null, draft: null, marquee: null, guides: [], ghost: null, panning: false, delArm: false });
+      this.setState({ sel: [], tool: 'select', panel: null, incoming: null, share: null, temp: null, draft: null, marquee: null, guides: [], ghost: null, panning: false, delArm: false });
       return;
     }
     if (e.key === '?') { this.togglePanel('help'); return; }
@@ -693,9 +826,14 @@ export default class Editor extends Component {
     if (dir) {
       if (!this.state.sel.length) return;
       e.preventDefault();
-      const step = e.shiftKey ? this.g() : 1, ids = new Set(this.state.sel);
+      const step = e.shiftKey ? this.g() : 1, dx = dir[0] * step, dy = dir[1] * step;
+      const moves = new Set(this.sheet().nodes.filter(n => !n.locked && this.state.sel.includes(n.id)).map(n => n.id));
+      if (!moves.size) return;
       this.pushHistory('nudge');
-      this.setNodes(a => a.map(n => (ids.has(n.id) ? { ...n, x: n.x + dir[0] * step, y: n.y + dir[1] * step } : n)));
+      this.updSheet(sh => ({
+        nodes: sh.nodes.map(n => (moves.has(n.id) ? { ...n, x: n.x + dx, y: n.y + dy } : n)),
+        edges: sh.edges.map(x => (x.pts && moves.has(x.from) && moves.has(x.to) ? { ...x, pts: F.shiftPts(x.pts, dx, dy) } : x))
+      }));
       return;
     }
     if (e.shiftKey && e.code === 'Digit1') { this.fit(); return; }
@@ -741,6 +879,49 @@ export default class Editor extends Component {
     doc.settings = { ...d.settings };
     doc.meta.drawnBy = d.meta.drawnBy;
     this.replaceDoc(doc, 'Started a new project');
+  }
+
+  // ---------- templates and share links
+  addTemplate(id) {
+    const tpl = TEMPLATES.find(x => x.id === id);
+    if (!tpl) return;
+    const d = this.state.doc;
+    const nums = d.sheets.map(sh => parseInt(String(sh.number).replace(/\D/g, ''), 10)).filter(n => !isNaN(n));
+    const number = 'A-' + (nums.length ? Math.max(...nums) + 1 : 101);
+    const sh = F.cleanSheet({ ...tpl.sheet(), number, view: null }, new Set(d.sheets.map(x => x.id)), number);
+    this.setState({ panel: null });
+    this.replaceDoc({ ...d, sheets: [...d.sheets, sh], active: sh.id }, `Added the ${tpl.name} template`);
+  }
+  async openShare() {
+    this.setState({ panel: 'share', share: { url: null } });
+    try {
+      const url = await shareLink(this.state.doc);
+      this.setState(st => (st.panel === 'share' ? { share: { url } } : null));
+    } catch {
+      this.setState(st => (st.panel === 'share' ? { share: { error: true } } : null));
+    }
+  }
+  onHash() { this.checkShared(); }
+  // Opens a project from a share link. A reader with a project of their own chooses what happens to it.
+  async checkShared() {
+    const payload = sharedPayload();
+    if (!payload) return;
+    const raw = await readShared(payload);
+    clearShared();
+    const doc = raw && F.cleanDoc(raw);
+    if (!doc) { this.flash('This share link is damaged or incomplete. Ask for a new link.', 5000); return; }
+    doc.sheets = doc.sheets.map(sh => ({ ...sh, view: null }));
+    if (!this._hadStored && !this._savedJSON) { this.replaceDoc(doc, 'Opened a shared project'); return; }
+    this.setState({ incoming: doc, panel: 'incoming' });
+  }
+  acceptShared(mode) {
+    const inc = this.state.incoming;
+    this.setState({ incoming: null, panel: null });
+    if (!inc || mode === 'cancel') return;
+    if (mode === 'replace') { this.replaceDoc(inc, 'Opened the shared project'); return; }
+    const d = this.state.doc, ids = new Set(d.sheets.map(sh => sh.id));
+    const added = inc.sheets.map((sh, i) => F.cleanSheet(sh, ids, 'A-' + (101 + d.sheets.length + i)));
+    this.replaceDoc({ ...d, sheets: [...d.sheets, ...added], active: added[0].id }, `Added ${added.length} shared ${added.length === 1 ? 'sheet' : 'sheets'}`);
   }
 
   // ---------- import and export
@@ -859,13 +1040,28 @@ export default class Editor extends Component {
   }
   renderOverlay(s, t, map, selSet) {
     const st = this.state, k = this.view().k, A = t.accent, sw = 1.25 / k, out = [];
-    const selNodes = s.nodes.filter(n => selSet.has(n.id));
+    const selNodes = s.nodes.filter(n => selSet.has(n.id)), groups = {};
+    // One outline for each selected group, one for each other shape, and a lock mark on locked ones.
+    const outline = (key, b, locked, group) => {
+      const p = (group ? 9 : 5) / k;
+      out.push(<rect key={'sel' + key} x={b.x - p} y={b.y - p} width={b.w + 2 * p} height={b.h + 2 * p} fill="none" stroke={A} strokeWidth={sw} strokeDasharray={group ? `${10 / k} ${4 / k}` : `${4 / k} ${3 / k}`} pointerEvents="none" />);
+      if (locked) {
+        out.push(
+          <g key={'lock' + key} transform={`translate(${b.x + b.w + p - 4 / k} ${b.y - p - 14 / k}) scale(${1 / k})`} pointerEvents="none">
+            <rect x="0" y="5" width="10" height="8" rx="1" fill={A} />
+            <path d="M2.5 5 V3.5 a2.5 2.5 0 0 1 5 0 V5" fill="none" stroke={A} strokeWidth="1.6" />
+          </g>
+        );
+      }
+    };
+    const inGroup = {};
+    selNodes.forEach(n => { if (n.group) inGroup[n.group] = (inGroup[n.group] || 0) + 1; });
     selNodes.forEach(n => {
-      if (n.type === 'line') return;
-      const b = F.hitBox(n), p = 5 / k;
-      out.push(<rect key={'sel' + n.id} x={b.x - p} y={b.y - p} width={b.w + 2 * p} height={b.h + 2 * p} fill="none" stroke={A} strokeWidth={sw} strokeDasharray={`${4 / k} ${3 / k}`} pointerEvents="none" />);
+      if (n.group && inGroup[n.group] > 1) { (groups[n.group] = groups[n.group] || []).push(n); return; }
+      if (n.type !== 'line' || n.locked) outline(n.id, F.hitBox(n), n.locked, false);
     });
-    const single = selNodes.length === 1 && st.sel.length === 1 && !st.editing ? selNodes[0] : null;
+    Object.entries(groups).forEach(([gid, ns]) => outline(gid, F.bounds(ns), ns.some(n => n.locked), true));
+    const single = selNodes.length === 1 && st.sel.length === 1 && !st.editing && !selNodes[0].locked ? selNodes[0] : null;
     if (single && st.dims) out.push(...renderDims(single, this.drawCtx(s), k));
     if (single) {
       const hs = 8 / k;
@@ -883,7 +1079,7 @@ export default class Editor extends Component {
       const o = 14 / k;
       [['top', 0, -o], ['right', o, 0], ['bottom', 0, o], ['left', -o, 0]].forEach(([sd, ox, oy]) => {
         const q = F.sidePt(hv, sd);
-        out.push(<circle key={'pt' + sd} cx={q.x + ox} cy={q.y + oy} r={4.5 / k} fill={t.paper} stroke={t.ink} strokeWidth={1.3 / k} data-k="port" data-id={hv.id} style={{ cursor: 'crosshair' }} />);
+        out.push(<circle key={'pt' + sd} cx={q.x + ox} cy={q.y + oy} r={4.5 / k} fill={t.paper} stroke={t.ink} strokeWidth={1.3 / k} data-k="port" data-id={hv.id} data-side={sd} style={{ cursor: 'crosshair' }} />);
       });
     }
     if (st.temp) {
@@ -891,17 +1087,29 @@ export default class Editor extends Component {
       if (a) {
         const tg = st.temp.target && map[st.temp.target], dash = `${6 / k} ${4 / k}`;
         if (tg) {
-          const geo = F.edgeGeom({ from: a.id, to: tg.id, route: this.defRoute() }, map), p = 5 / k;
+          const geo = F.edgeGeom({ from: a.id, to: tg.id, route: this.defRoute(), fromSide: st.temp.fromSide, toSide: st.temp.toSide }, map), p = 5 / k, o = 14 / k;
           if (geo) out.push(<path key="tmp" d={geo.d} fill="none" stroke={A} strokeWidth={1.6} strokeDasharray={dash} pointerEvents="none" />);
           out.push(<rect key="tgt" x={tg.x - p} y={tg.y - p} width={tg.w + 2 * p} height={tg.h + 2 * p} fill="none" stroke={A} strokeWidth={2 / k} pointerEvents="none" />);
+          // The ports of the target: release on one to fix the side where the connector arrives.
+          ['top', 'right', 'bottom', 'left'].forEach(sd => {
+            const q = F.sidePt(tg, sd), nn = F.NORM[sd], on = st.temp.toSide === sd;
+            out.push(<circle key={'tp' + sd} cx={q.x + nn.x * o} cy={q.y + nn.y * o} r={(on ? 6 : 4.5) / k} fill={on ? A : t.paper} stroke={on ? A : t.ink} strokeWidth={1.3 / k} pointerEvents="none" />);
+          });
         } else {
-          const [s1] = F.autoSides(a, { x: st.temp.p.x, y: st.temp.p.y, w: 0, h: 0 }), q = F.sidePt(a, s1);
+          const s1 = st.temp.fromSide || F.autoSides(a, { x: st.temp.p.x, y: st.temp.p.y, w: 0, h: 0 })[0], q = F.sidePt(a, s1);
           out.push(
             <line key="tmp" x1={q.x} y1={q.y} x2={st.temp.p.x} y2={st.temp.p.y} stroke={A} strokeWidth={1.6} strokeDasharray={dash} pointerEvents="none" />,
             <circle key="tmpc" cx={st.temp.p.x} cy={st.temp.p.y} r={3.5 / k} fill={A} pointerEvents="none" />
           );
         }
       }
+    }
+    const selEdge = st.sel.length === 1 && !st.editing && !this.drag ? s.edges.find(x => x.id === st.sel[0]) : null;
+    const geoSel = selEdge && F.edgeGeom(selEdge, map);
+    if (geoSel) {
+      // Round handles add a bend. Square handles move a bend, and a double-click removes it.
+      geoSel.handles.forEach(hd => out.push(<circle key={'wa' + hd.i} cx={hd.x} cy={hd.y} r={4 / k} fill={t.paper} stroke={A} strokeWidth={1.3 / k} data-k="wpadd" data-id={selEdge.id} data-i={hd.i} style={{ cursor: 'copy' }}><title>Drag to bend the connector</title></circle>));
+      (selEdge.pts || []).forEach((q, i) => out.push(<rect key={'wp' + i} x={q.x - 4.5 / k} y={q.y - 4.5 / k} width={9 / k} height={9 / k} fill={A} stroke={t.paper} strokeWidth={1 / k} data-k="wp" data-id={selEdge.id} data-i={i} style={{ cursor: 'move' }}><title>Drag to move the bend. Double-click to remove it.</title></rect>));
     }
     st.guides.forEach((gd, i) => out.push(<line key={'g' + i} x1={gd.x1} y1={gd.y1} x2={gd.x2} y2={gd.y2} stroke={A} strokeWidth={1 / k} strokeDasharray={`${3 / k} ${3 / k}`} pointerEvents="none" />));
     if (st.marquee) { const m = st.marquee; out.push(<rect key="mq" x={m.x} y={m.y} width={m.w} height={m.h} fill={A} fillOpacity={0.08} stroke={A} strokeWidth={1 / k} strokeDasharray={`${4 / k} ${3 / k}`} pointerEvents="none" />); }
@@ -925,7 +1133,7 @@ export default class Editor extends Component {
       if (!n) return null;
       fs = F.SIZES[n.size || 'm'] * (n.type === 'note' ? 0.9 : n.type === 'zone' ? 0.95 : 1);
       if (n.type === 'actor') box = { x: n.x + n.w / 2 - 90, y: n.y + n.h + 2, w: 180, h: 44 };
-      else if (n.type === 'zone') { box = { x: n.x, y: n.y, w: Math.max(220, Math.min(n.w, 320)), h: 30 }; align = 'left'; }
+      else if (n.type === 'zone') { box = { x: n.x + (n.icon ? 24 : 0), y: n.y, w: Math.max(220, Math.min(n.w, 320)), h: 30 }; align = 'left'; }
       else if (n.type === 'window') { box = { x: n.x + 50, y: n.y, w: Math.max(120, n.w - 50), h: 28 }; align = 'left'; fs *= 0.85; }
       else if (n.type === 'note' || n.type === 'input') { box = { x: n.x, y: n.y, w: n.w, h: n.h }; align = 'left'; }
       else box = { x: n.x, y: n.y, w: Math.max(n.w, 120), h: Math.max(n.h, 40) };
@@ -1009,7 +1217,7 @@ export default class Editor extends Component {
           <div className="empty">
             <div>
               <h2>EMPTY SHEET</h2>
-              <p>Pick a shape on the left and click or drag on the sheet. The library has doors, furniture and more. Drag from the small circles around a shape to connect it to another. Double-click empty space to write a label.</p>
+              <p>Pick a shape on the left and click or drag on the sheet. The library has doors, furniture and cloud icons, and NEW has templates. Drag from the small circles around a shape to connect it to another. Double-click empty space to write a label.</p>
             </div>
           </div>
         )}
@@ -1021,7 +1229,7 @@ export default class Editor extends Component {
             undo: () => this.doUndo(), redo: () => this.doRedo(),
             snap: () => this.setState({ snap: !st.snap }), dims: () => this.setState({ dims: !st.dims }),
             blue: () => this.setState({ mode: 'blue' }), white: () => this.setState({ mode: 'white' }),
-            newDoc: () => this.newDoc(), open: () => this.openFile(),
+            newDoc: () => this.togglePanel('new'), open: () => this.openFile(), share: () => (st.panel === 'share' ? this.shareUI.close() : this.openShare()),
             png: () => this.exportImg('png'), svg: () => this.exportImg('svg'), json: () => this.exportJSON(),
             setup: () => this.togglePanel('setup'), help: () => this.togglePanel('help')
           }}
@@ -1040,7 +1248,21 @@ export default class Editor extends Component {
             front: () => this.arrange(true), back: () => this.arrange(false), dup: () => this.duplicate(), del: () => this.del(), wrap: () => this.wrapZone(),
             align: kind => this.align(kind), distribute: axis => this.distribute(axis),
             rotate: () => this.rotateSel(), flip: () => this.flipSel(),
-            reverse: () => { const id = st.sel[0]; this.pushHistory(); this.setEdges(a => a.map(q => (q.id === id ? { ...q, from: q.to, to: q.from } : q))); }
+            group: () => this.groupSel(), ungroup: () => this.ungroupSel(), lock: () => this.lockSel(),
+            sides: patch => this.setEdgeSides(st.sel[0], patch), straighten: () => this.clearBends(st.sel[0]),
+            noIcon: () => { const id = st.sel[0]; this.pushHistory(); this.setNodes(a => a.map(q => (q.id === id ? without(q, 'icon') : q))); },
+            reverse: () => {
+              const id = st.sel[0];
+              this.pushHistory();
+              this.setEdges(a => a.map(q => {
+                if (q.id !== id) return q;
+                let r = without(without({ ...q, from: q.to, to: q.from }, 'fromSide'), 'toSide');
+                if (q.toSide) r.fromSide = q.toSide;
+                if (q.fromSide) r.toSide = q.fromSide;
+                if (q.pts) r = { ...r, pts: [...q.pts].reverse() };
+                return r;
+              }));
+            }
           }}
         />
 
@@ -1050,6 +1272,9 @@ export default class Editor extends Component {
             tool={st.tool} theme={t} pins={st.pins} onPin={this.lib.pin} onPick={this.lib.pick} onDragStart={this.lib.drag} onClose={this.lib.close}
           />
         )}
+        {st.panel === 'new' && <NewPanel theme={t} letter={ctx.L} caps={ctx.caps} grid={g} on={this.tpl} />}
+        {st.panel === 'share' && <SharePanel share={st.share} on={this.shareUI} />}
+        {st.panel === 'incoming' && st.incoming && <IncomingPanel doc={st.incoming} on={this.inUI} />}
         {st.panel === 'setup' && <SetupPanel settings={d.settings} onSet={patch => this.setSettings(patch)} onClose={() => this.setState({ panel: null })} />}
 
         {!tiny && (

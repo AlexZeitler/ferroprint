@@ -1,6 +1,6 @@
 // Ferroprint engine: constants, geometry, document model, export helpers.
 import { SYMBOLS } from './library.jsx';
-import { isCloudKey, cloudIcon, cloudLabel, cloudProvider, PROVIDER_NAME } from './cloud.js';
+import { isCloudKey, cloudIcon, cloudLabel, cloudProvider, PROVIDER_NAME, FRAME } from './cloud.js';
 
 export const MONO = "'IBM Plex Mono', ui-monospace, monospace";
 
@@ -51,10 +51,14 @@ export const TURN = symbolSet(s => s.turn);
 // Shapes with the label under the drawing, so the label is part of the hit area.
 const BELOW = { actor: 1, cloud: 1, ...symbolSet(s => s.below) };
 
-// A tool places a palette shape, a library symbol or a cloud icon. Cloud icon tools are "cloud:<key>".
+// A tool places a palette shape, a library symbol, a cloud icon ("cloud:<key>") or a frame ("frame:<id>").
 export const CLOUD_SIZE = 48;
 export function toolShape(tool) {
   if (SHAPES[tool]) return { type: tool, ...SHAPES[tool] };
+  if (typeof tool === 'string' && tool.startsWith('frame:') && FRAME[tool.slice(6)]) {
+    const f = FRAME[tool.slice(6)];
+    return { type: 'zone', name: `${PROVIDER_NAME[f.p]} ${f.name}`, w: f.w, h: f.h, label: f.name, icon: f.icon, dashed: !f.solid };
+  }
   if (typeof tool === 'string' && tool.startsWith('cloud:') && isCloudKey(tool.slice(6))) {
     const key = tool.slice(6), ic = cloudIcon(key);
     return { type: 'cloud', icon: key, name: ic ? ic.n : 'Cloud icon', w: CLOUD_SIZE, h: CLOUD_SIZE, label: cloudLabel(ic) };
@@ -67,7 +71,9 @@ export function nodeTitle(n) {
   const ic = cloudIcon(n.icon);
   return ic ? cloudLabel(ic) : 'Cloud icon';
 }
-export const nodeMeta = n => (n.type === 'cloud' ? PROVIDER_NAME[cloudProvider(n.icon)] : null);
+export const nodeMeta = n => (n.locked ? 'LOCKED' : n.type === 'cloud' ? PROVIDER_NAME[cloudProvider(n.icon)] : null);
+// The cloud set a shape needs: a cloud icon, or a zone with a frame icon.
+export const nodeCloud = n => (n.icon && isCloudKey(n.icon) ? cloudProvider(n.icon) : null);
 export const THEMES = {
   blue: { paper: '#1e4d8c', ink: '#eef4ff', muted: 'rgba(238,244,255,0.74)', panel: '#1a4580', hover: 'rgba(238,244,255,0.10)', line: 'rgba(238,244,255,0.32)', minor: 'rgba(238,244,255,0.075)', major: 'rgba(238,244,255,0.17)', tint: 'rgba(238,244,255,0.10)', hatch: 'rgba(238,244,255,0.42)', accent: '#f4bf4f', accentInk: '#1a2a48', vig: 'rgba(3,12,36,0.40)', tex: [1, 1, 1] },
   white: { paper: '#f4f2eb', ink: '#24398a', muted: 'rgba(36,57,138,0.78)', panel: '#ece9df', hover: 'rgba(36,57,138,0.08)', line: 'rgba(36,57,138,0.30)', minor: 'rgba(36,57,138,0.07)', major: 'rgba(36,57,138,0.15)', tint: 'rgba(36,57,138,0.07)', hatch: 'rgba(36,57,138,0.38)', accent: '#d1432f', accentInk: '#ffffff', vig: 'rgba(80,64,20,0.14)', tex: [0.14, 0.22, 0.54] }
@@ -152,26 +158,129 @@ export function constrain(a, b) {
   const ang = Math.atan2(b.y - a.y, b.x - a.x), s = Math.round(ang / (Math.PI / 4)) * (Math.PI / 4), l = Math.hypot(b.x - a.x, b.y - a.y);
   return { x: Math.round(a.x + Math.cos(s) * l), y: Math.round(a.y + Math.sin(s) * l) };
 }
-export function edgeGeom(e, map) {
-  const a = map[e.from], b = map[e.to];
-  if (!a || !b) return null;
-  const route = e.route || 'elbow';
+// ---------- connectors
+// A connector leaves and enters a shape on a side. "auto" lets the router choose the side.
+export const SIDES = ['auto', 'top', 'right', 'bottom', 'left'];
+const STUB = 16;
+const fixedSide = s => (s && s !== 'auto' ? s : null);
+const centerOf = b => ({ x: b.x + b.w / 2, y: b.y + b.h / 2 });
+// The side of box b that faces point q.
+const sideToward = (b, q) => autoSides(b, { x: q.x, y: q.y, w: 0, h: 0 })[0];
+const along = (p, n, d) => ({ x: p.x + n.x * d, y: p.y + n.y * d });
+const same = (a, b) => Math.abs(a.x - b.x) < 0.01 && Math.abs(a.y - b.y) < 0.01;
+
+// Removes repeated points and points in the middle of a straight run.
+function simplify(pts) {
+  const out = [];
+  pts.forEach(p => {
+    if (out.length && same(out[out.length - 1], p)) return;
+    out.push({ x: p.x, y: p.y });
+    while (out.length >= 3) {
+      const [a, b, c] = out.slice(-3);
+      if (Math.abs((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)) > 0.01) break;
+      out.splice(out.length - 2, 1);
+    }
+  });
+  return out;
+}
+const lengthOf = pts => pts.slice(1).reduce((t, p, i) => t + Math.hypot(p.x - pts[i].x, p.y - pts[i].y), 0);
+// The point at a share of the length of a polyline.
+function pointAt(pts, f) {
+  let left = lengthOf(pts) * f;
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1], b = pts[i], l = Math.hypot(b.x - a.x, b.y - a.y);
+    if (left <= l && l > 0) return { x: a.x + ((b.x - a.x) * left) / l, y: a.y + ((b.y - a.y) * left) / l };
+    left -= l;
+  }
+  return pts[pts.length - 1];
+}
+// Joins two points with one horizontal and one vertical run. The first run follows the axis.
+function join(a, b, axis) {
+  if (Math.abs(a.x - b.x) < 0.01) return { pts: [b], axis: 'v' };
+  if (Math.abs(a.y - b.y) < 0.01) return { pts: [b], axis: 'h' };
+  return { pts: [axis === 'h' ? { x: b.x, y: a.y } : { x: a.x, y: b.y }, b], axis: axis === 'h' ? 'v' : 'h' };
+}
+// The turns between two stubs when the connector has no bends.
+function elbowTurns(a1, n1, b2, n2) {
+  const h1 = !!n1.x, h2 = !!n2.x, mx = (a1.x + b2.x) / 2, my = (a1.y + b2.y) / 2;
+  if (h1 && h2) return n1.x * (b2.x - a1.x) >= 0 ? [{ x: mx, y: a1.y }, { x: mx, y: b2.y }] : [{ x: a1.x, y: my }, { x: b2.x, y: my }];
+  if (!h1 && !h2) return n1.y * (b2.y - a1.y) >= 0 ? [{ x: a1.x, y: my }, { x: b2.x, y: my }] : [{ x: mx, y: a1.y }, { x: mx, y: b2.y }];
+  if (h1) return [n1.x * (b2.x - a1.x) >= 0 ? { x: b2.x, y: a1.y } : { x: a1.x, y: b2.y }];
+  return [n1.y * (b2.y - a1.y) >= 0 ? { x: a1.x, y: b2.y } : { x: b2.x, y: a1.y }];
+}
+const polyD = pts => 'M' + pts.map(q => `${f1(q.x)} ${f1(q.y)}`).join(' L');
+
+// The automatic route: sides that face each other, and one turn in the middle.
+function autoGeom(e, a, b, route) {
   if (route === 'straight') {
-    const ac = { x: a.x + a.w / 2, y: a.y + a.h / 2 }, bc = { x: b.x + b.w / 2, y: b.y + b.h / 2 };
-    const p1 = clipBox(ac, bc, a), p2 = clipBox(bc, ac, b);
-    return { d: `M${p1.x} ${p1.y} L${p2.x} ${p2.y}`, p1, p2, mid: { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 }, endDir: unit(p1, p2), startDir: unit(p2, p1) };
+    const ac = centerOf(a), bc = centerOf(b);
+    const p1 = clipBox(ac, bc, a), p2 = clipBox(bc, ac, b), mid = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
+    return { d: `M${p1.x} ${p1.y} L${p2.x} ${p2.y}`, p1, p2, mid, endDir: unit(p1, p2), startDir: unit(p2, p1), handles: [{ ...mid, i: 0 }] };
   }
   const [s1, s2] = autoSides(a, b), p1 = sidePt(a, s1), p2 = sidePt(b, s2);
   if (route === 'curve') {
     const n1 = NORM[s1], n2 = NORM[s2], kk = Math.max(30, Math.hypot(p2.x - p1.x, p2.y - p1.y) * 0.45);
-    const c1 = { x: p1.x + n1.x * kk, y: p1.y + n1.y * kk }, c2 = { x: p2.x + n2.x * kk, y: p2.y + n2.y * kk };
-    return { d: `M${p1.x} ${p1.y} C${c1.x} ${c1.y} ${c2.x} ${c2.y} ${p2.x} ${p2.y}`, p1, p2, mid: bez(p1, c1, c2, p2, 0.5), endDir: unit(c2, p2), startDir: unit(c1, p1) };
+    const c1 = along(p1, n1, kk), c2 = along(p2, n2, kk), mid = bez(p1, c1, c2, p2, 0.5);
+    return { d: `M${p1.x} ${p1.y} C${c1.x} ${c1.y} ${c2.x} ${c2.y} ${p2.x} ${p2.y}`, p1, p2, mid, endDir: unit(c2, p2), startDir: unit(c1, p1), handles: [{ ...mid, i: 0 }] };
   }
   let pts;
   if (s1 === 'left' || s1 === 'right') { const mx = Math.round((p1.x + p2.x) / 2); pts = [p1, { x: mx, y: p1.y }, { x: mx, y: p2.y }, p2]; }
   else { const my = Math.round((p1.y + p2.y) / 2); pts = [p1, { x: p1.x, y: my }, { x: p2.x, y: my }, p2]; }
-  return { d: 'M' + pts.map(q => `${q.x} ${q.y}`).join(' L'), p1, p2, mid: { x: (pts[1].x + pts[2].x) / 2, y: (pts[1].y + pts[2].y) / 2 }, endDir: { x: -NORM[s2].x, y: -NORM[s2].y }, startDir: { x: -NORM[s1].x, y: -NORM[s1].y } };
+  const mid = { x: (pts[1].x + pts[2].x) / 2, y: (pts[1].y + pts[2].y) / 2 };
+  return { d: 'M' + pts.map(q => `${q.x} ${q.y}`).join(' L'), p1, p2, mid, endDir: { x: -NORM[s2].x, y: -NORM[s2].y }, startDir: { x: -NORM[s1].x, y: -NORM[s1].y }, handles: [{ ...mid, i: 0 }] };
 }
+
+// Connector geometry. `handles` are the points where a drag adds a bend: index i inserts before bend i.
+export function edgeGeom(e, map) {
+  const a = map[e.from], b = map[e.to];
+  if (!a || !b) return null;
+  const route = e.route || 'elbow', wp = e.pts || [], fs = fixedSide(e.fromSide), ts = fixedSide(e.toSide);
+  if (!fs && !ts && !wp.length) return autoGeom(e, a, b, route);
+  const ac = centerOf(a), bc = centerOf(b);
+  if (route === 'straight') {
+    const p1 = fs ? sidePt(a, fs) : clipBox(ac, wp[0] || (ts ? sidePt(b, ts) : bc), a);
+    const p2 = ts ? sidePt(b, ts) : clipBox(bc, wp[wp.length - 1] || p1, b);
+    const all = [p1, ...wp, p2], pieces = all.slice(1).map((q, i) => [all[i], q]);
+    return finish(pieces, p1, p2, polyD(all), unit(all[all.length - 2], p2), unit(all[1], p1));
+  }
+  const s1 = fs || sideToward(a, wp[0] || (ts ? sidePt(b, ts) : bc));
+  const s2 = ts || sideToward(b, wp[wp.length - 1] || sidePt(a, s1));
+  const p1 = sidePt(a, s1), p2 = sidePt(b, s2), n1 = NORM[s1], n2 = NORM[s2];
+  if (route === 'curve') {
+    const all = [p1, ...wp, p2], pieces = [];
+    let d = `M${f1(p1.x)} ${f1(p1.y)}`, lastC = p1, firstC = null;
+    for (let i = 0; i < all.length - 1; i++) {
+      const P0 = all[i], P1 = all[i + 1], len = Math.hypot(P1.x - P0.x, P1.y - P0.y);
+      const c1 = i === 0 ? along(P0, n1, Math.max(30, len * 0.45)) : { x: P0.x + (P1.x - all[i - 1].x) / 6, y: P0.y + (P1.y - all[i - 1].y) / 6 };
+      const c2 = i === all.length - 2 ? along(P1, n2, Math.max(30, len * 0.45)) : { x: P1.x - (all[i + 2].x - P0.x) / 6, y: P1.y - (all[i + 2].y - P0.y) / 6 };
+      d += ` C${f1(c1.x)} ${f1(c1.y)} ${f1(c2.x)} ${f1(c2.y)} ${f1(P1.x)} ${f1(P1.y)}`;
+      pieces.push(Array.from({ length: 9 }, (_, k) => bez(P0, c1, c2, P1, k / 8)));
+      if (!firstC) firstC = c1;
+      lastC = c2;
+    }
+    return finish(pieces, p1, p2, d, unit(lastC, p2), unit(firstC, p1));
+  }
+  // Elbow: horizontal and vertical runs through every bend.
+  const a1 = along(p1, n1, STUB), b2 = along(p2, n2, STUB);
+  let pieces;
+  if (!wp.length) pieces = [[p1, a1, ...elbowTurns(a1, n1, b2, n2), b2, p2]];
+  else {
+    pieces = [];
+    let axis = n1.x ? 'h' : 'v', piece = [p1, a1], cur = a1;
+    wp.forEach(w => { const r = join(cur, w, axis); piece.push(...r.pts); pieces.push(piece); piece = [w]; axis = r.axis; cur = w; });
+    const r = join(cur, b2, axis);
+    piece.push(...r.pts, p2);
+    pieces.push(piece);
+  }
+  const all = simplify(pieces.flat());
+  return finish(pieces, p1, p2, polyD(all), unit(all[all.length - 2] || p1, p2), unit(all[1] || p2, p1));
+}
+function finish(pieces, p1, p2, d, endDir, startDir) {
+  const all = simplify(pieces.flat());
+  return { d, p1, p2, mid: pointAt(all, 0.5), endDir, startDir, handles: pieces.map((pc, i) => ({ ...pointAt(simplify(pc), 0.5), i })) };
+}
+// Moves the bends of a connector, for example when both of its shapes move.
+export const shiftPts = (pts, dx, dy) => (pts && pts.length ? pts.map(q => ({ x: q.x + dx, y: q.y + dy })) : pts);
 
 // ---------- units: one grid square is 1 ft or 0.5 m on a scaled sheet
 export function fmtLen(px, u, g) {
@@ -215,7 +324,8 @@ export function newNode(tool, r) {
   const sh = toolShape(tool), type = sh.type;
   const n = { id: uid(), type, x: r.x, y: r.y, w: r.w, h: r.h, label: sh.label, sub: '', dashed: type === 'zone', fill: 'none', size: type === 'zone' ? 's' : 'm', flip: false };
   if (TURN[type]) n.rot = 0;
-  if (type === 'cloud') n.icon = sh.icon;
+  if (sh.icon) n.icon = sh.icon;
+  if (sh.dashed != null) n.dashed = sh.dashed;
   return n;
 }
 export function newSheet(number) {
@@ -327,7 +437,9 @@ function cleanNode(n, ids) {
     flip: !!n.flip
   };
   if (TURN[type]) out.rot = oneOf(n.rot, [0, 90, 180, 270], 0);
-  if (type === 'cloud') out.icon = n.icon;
+  if ((type === 'cloud' || type === 'zone') && isCloudKey(n.icon)) out.icon = n.icon;
+  if (typeof n.group === 'string' && /^[a-z0-9]{1,16}$/.test(n.group)) out.group = n.group;
+  if (n.locked === true) out.locked = true;
   if (type === 'path' || type === 'line') {
     const pts = Array.isArray(n.pts) ? n.pts.filter(p => Array.isArray(p) && num(p[0]) && num(p[1])).map(p => [p[0], p[1]]) : [];
     if (pts.length < 2) return null;
@@ -343,7 +455,13 @@ function cleanEdge(e, nodeIds, ids) {
   let id = str(e.id);
   if (!id || ids.has(id)) id = uid();
   ids.add(id);
-  return { id, from, to, label: str(e.label), route: oneOf(e.route, ROUTES, 'elbow'), arrow: oneOf(e.arrow, ['none', 'end', 'both'], 'end'), dashed: !!e.dashed };
+  const out = { id, from, to, label: str(e.label), route: oneOf(e.route, ROUTES, 'elbow'), arrow: oneOf(e.arrow, ['none', 'end', 'both'], 'end'), dashed: !!e.dashed };
+  // Sides and bends are optional, so a plain connector stays small in the JSON.
+  if (SIDES.includes(e.fromSide) && e.fromSide !== 'auto') out.fromSide = e.fromSide;
+  if (SIDES.includes(e.toSide) && e.toSide !== 'auto') out.toSide = e.toSide;
+  const pts = Array.isArray(e.pts) ? e.pts.filter(q => q && num(q.x) && num(q.y)).slice(0, 40).map(q => ({ x: q.x, y: q.y })) : [];
+  if (pts.length) out.pts = pts;
+  return out;
 }
 export function cleanSheet(s, sheetIds, fallbackNumber) {
   if (!s || typeof s !== 'object') return null;

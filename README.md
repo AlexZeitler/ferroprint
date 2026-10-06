@@ -17,7 +17,11 @@ Open the app: https://bjarneo.github.io/ferroprint/
 - Search the library, click a symbol to place it, or drag a symbol onto the sheet. The palette keeps the last 3 symbols that you used.
 - Pin any library shape or cloud icon to the toolbar with the pin on its tile. To unpin a shape, right-click it in the toolbar, or use its pin again.
 - Rotate doors and furniture 90° with `Shift R`, and mirror them with `Shift H`. Plan symbols use real sizes: on a sheet in feet, one grid square is 1 ft.
-- Connect shapes with elbow, straight or curved connectors.
+- Frame cloud diagrams with boundary frames: AWS Cloud, Region, VPC and subnets, Azure subscriptions, resource groups and virtual networks, Google Cloud projects and VPC networks, and Alibaba Cloud regions, VPCs and vSwitches. Each frame shows the provider's group icon in its tab.
+- Start a sheet from a template: an AWS three-tier web app, an Azure hub-and-spoke network, a Google Cloud data pipeline, an Alibaba Cloud web app, a furnished apartment, a checkout flow or a microservices overview.
+- Connect shapes with elbow, straight or curved connectors. Drag from a port to fix the side where a connector leaves a shape, and release on a port to fix the side where it arrives. Drag the round handle on a selected connector to add a bend. Double-click a bend to remove it.
+- Group shapes with `Ctrl G`, so they select and move as one. `Ctrl`-click selects one shape inside a group. Lock a shape with `Ctrl Shift L`, so it does not move. A locked background plan lets clicks through to the shapes on top.
+- Share a project with a link. The link holds the whole project in its `#` part, which the browser does not send to a server.
 - Draw freehand strokes and walls. Hold Shift to snap a wall to 45°.
 - Organize a project in numbered sheets, each with its own title block and drawing units (px, ft or m).
 - Switch between a blueprint (white on blue) and a whiteprint (blue on white) look.
@@ -32,7 +36,8 @@ Press `?` in the app to see all keyboard shortcuts.
 - If the app is open in two tabs, each tab takes the changes that the other tab saves.
 - `localStorage` belongs to one browser on one device. To move a project or keep a backup, use **Export JSON**, then **Open** the file on the other device.
 - If the browser blocks storage or the storage is full, the top bar shows `NOT SAVED`. Export JSON to keep your work.
-- **New** and **Open** replace the current project. The message that follows has an **UNDO** button that brings the previous project back.
+- A blank project from **New**, and **Open**, replace the current project. The message that follows has an **UNDO** button that brings the previous project back. A template or a blank sheet joins the current project.
+- When you open a share link and you already have a project, Ferroprint asks if it adds the shared sheets to your project or replaces your project. On a first visit, the shared project opens at once.
 
 ## Cloud icons
 
@@ -84,7 +89,9 @@ The workflow in `.github/workflows/pages.yml` builds the app and publishes `dist
 | `src/engine.js` | Shapes, themes, geometry, units, document validation and export helpers |
 | `src/draw.jsx` | SVG drawing for shapes, connectors and dimension marks |
 | `src/library.jsx` | Library symbols, their default sizes and label positions |
-| `src/cloud.js` | Loads the cloud icon sets on demand |
+| `src/cloud.js` | Loads the cloud icon sets on demand, and holds the boundary frames |
+| `src/templates.js` | Starter templates |
+| `src/share.js` | Share links: the project compressed into the URL |
 | `scripts/cloud-icons.mjs` | Converts the official cloud icons to line art |
 | `src/Editor.jsx` | Editor state, pointer and keyboard input, history, sheets, files and autosave |
 | `src/chrome.jsx` | Toolbars, inspector, panels, title block and status bar |

@@ -110,18 +110,20 @@ export function renderNode(n, ctx) {
       break;
     }
     case 'zone': {
+      // A frame zone shows its group icon in the tab, before the label.
       const fs = SIZES[n.size || 's'] * 0.95, str = n.label ? txt(ctx, n.label) : '', font = `${L.weight} ${fs}px ${L.family}`;
-      const tw = str ? Math.min(w, measure(str, font) + str.length * L.ls * fs + 24) : 0, th = 26;
+      const ic = n.icon ? cloudIcon(n.icon) : null, iw = n.icon ? 24 : 0, th = 26;
+      const tw = str || iw ? Math.min(w, (str ? measure(str, font) + str.length * L.ls * fs + 24 : 12) + iw) : 0;
       k.push(
         <rect key="hs" x={x} y={y} width={w} height={hh} fill="none" stroke="transparent" strokeWidth={14} pointerEvents="stroke" />,
         <rect key="s" {...S} x={x} y={y} width={w} height={hh} pointerEvents="none" />
       );
-      if (str) {
-        k.push(
-          <rect key="tab" x={x} y={y} width={tw} height={th} fill={t.paper} stroke={t.ink} strokeWidth={1.6} />,
-          <text key="tl" x={x + 12} y={y + th / 2 + 1} dominantBaseline="central" fill={t.ink} fontFamily={L.family} fontWeight={L.weight} fontSize={fs} letterSpacing={L.ls * fs}>{str}</text>
-        );
+      if (tw) k.push(<rect key="tab" x={x} y={y} width={tw} height={th} fill={t.paper} stroke={t.ink} strokeWidth={1.6} />);
+      if (ic) {
+        const [vx, vy, vw, vh] = ic.v, sc = 18 / Math.max(vw, vh);
+        k.push(<g key="ic" transform={`translate(${x + 7 + (18 - vw * sc) / 2} ${y + 4 + (18 - vh * sc) / 2}) scale(${sc}) translate(${-vx} ${-vy})`}>{cloudPaths(ic, t, 1.1 / sc, false)}</g>);
       }
+      if (str) k.push(<text key="tl" x={x + 12 + iw} y={y + th / 2 + 1} dominantBaseline="central" fill={t.ink} fontFamily={L.family} fontWeight={L.weight} fontSize={fs} letterSpacing={L.ls * fs}>{str}</text>);
       if (n.sub) k.push(<text key="ts" x={x + tw + 10} y={y + th / 2 + 1} dominantBaseline="central" fill={t.muted} fontFamily={MONO} fontSize={11}>{n.sub}</text>);
       break;
     }

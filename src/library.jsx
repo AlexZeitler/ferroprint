@@ -1,4 +1,4 @@
-import { cloudIcon, isCloudKey } from './cloud.js';
+import { cloudIcon, isCloudKey, FRAME } from './cloud.js';
 
 // Symbol library: floor plan, furniture, system, flow and interface symbols.
 // Each symbol draws itself in a local w × h box with a "pen". The editor rotates and mirrors that box.
@@ -515,8 +515,28 @@ export function CloudIcon({ k, size = 40, t }) {
   return <svg width={size} height={size} viewBox={`${x} ${y} ${w} ${h}`} aria-hidden="true">{cloudPaths(ic, t, 1, true)}</svg>;
 }
 
-// The icon of any tool that places a library shape: a symbol or a cloud icon ("cloud:aws/amazon-ec2").
+// A boundary frame: a box with a tab that holds the provider's group icon.
+export function FrameIcon({ id, size = 40, t }) {
+  const f = FRAME[id], ic = f && f.icon ? cloudIcon(f.icon) : null;
+  if (!f) return null;
+  let icon = null;
+  if (ic) {
+    const [x, y, w, h] = ic.v, s = 11 / Math.max(w, h);
+    icon = <g transform={`translate(5 6.5) scale(${s}) translate(${-x} ${-y})`}>{cloudPaths(ic, t, 1, true)}</g>;
+  }
+  return (
+    <svg width={size} height={size} viewBox="0 0 40 40" aria-hidden="true" style={{ fill: 'none', stroke: 'currentColor' }}>
+      <rect x="2" y="5" width="36" height="31" strokeWidth="1.2" strokeDasharray={f.solid ? undefined : '3 2'} vectorEffect="non-scaling-stroke" />
+      <path d="M2 18.5 H20 V5" strokeWidth="1.2" vectorEffect="non-scaling-stroke" />
+      {icon}
+    </svg>
+  );
+}
+
+// The icon of any tool that places a library shape: a symbol, a cloud icon ("cloud:aws/amazon-ec2")
+// or a frame ("frame:aws-vpc").
 export function ToolIcon({ id, size, t }) {
   if (id.startsWith('cloud:') && isCloudKey(id.slice(6))) return <CloudIcon k={id.slice(6)} size={size} t={t} />;
+  if (id.startsWith('frame:')) return <FrameIcon id={id.slice(6)} size={size} t={t} />;
   return <SymbolIcon id={id} size={size} t={t} />;
 }
