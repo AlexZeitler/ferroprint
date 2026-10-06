@@ -533,10 +533,28 @@ export function FrameIcon({ id, size = 40, t }) {
   );
 }
 
+// A class box, an interface, an enum or a package, drawn at tile size.
+export function UmlIcon({ kind, size = 40 }) {
+  const st = { fill: 'none', stroke: 'currentColor', strokeWidth: 1.2, vectorEffect: 'non-scaling-stroke' };
+  if (kind === 'package') {
+    return <svg width={size} height={size} viewBox="0 0 40 40" aria-hidden="true"><path d="M4 12 V35 H36 V12 H18 V6 H4 Z M4 12 H18" {...st} /></svg>;
+  }
+  const tag = { abstract: '«A»', interface: '«I»', enum: '«E»' }[kind], head = tag ? 15 : 12, enumK = kind === 'enum';
+  return (
+    <svg width={size} height={size} viewBox="0 0 40 40" aria-hidden="true">
+      <rect x="6" y="4" width="28" height="32" {...st} />
+      <path d={`M6 ${head} H34${enumK ? '' : ' M6 26 H34'}`} {...st} />
+      {tag ? <text x="20" y="10.5" textAnchor="middle" fontSize="6.5" fontFamily="monospace" fill="currentColor">{tag}</text> : <path d="M14 8 H26" {...st} strokeWidth={1.6} />}
+      <path d={enumK ? 'M10 20 H24 M10 24 H28 M10 28 H22 M10 32 H26' : `M10 ${head + 4} H26 M10 ${head + 8} H22 M10 30 H28 M10 33 H24`} {...st} strokeOpacity={0.6} />
+    </svg>
+  );
+}
+
 // The icon of any tool that places a library shape: a symbol, a cloud icon ("cloud:aws/amazon-ec2")
 // or a frame ("frame:aws-vpc").
 export function ToolIcon({ id, size, t }) {
   if (id.startsWith('cloud:') && isCloudKey(id.slice(6))) return <CloudIcon k={id.slice(6)} size={size} t={t} />;
   if (id.startsWith('frame:')) return <FrameIcon id={id.slice(6)} size={size} t={t} />;
+  if (id.startsWith('uml:')) return <UmlIcon kind={id.slice(4)} size={size} />;
   return <SymbolIcon id={id} size={size} t={t} />;
 }

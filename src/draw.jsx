@@ -1,6 +1,6 @@
 // Pure SVG drawing for shapes, connectors and dimension marks.
 // `ctx` holds the theme (t), the lettering (L), the caps flag, the sheet unit and the grid size.
-import { SIZES, WEIGHTS, MONO, measure, wrap, linePts, edgeGeom, areaLabel, fmtLen, f1, hitBox } from './engine.js';
+import { SIZES, WEIGHTS, MONO, measure, wrap, linePts, edgeGeom, areaLabel, fmtLen, f1, hitBox, classLayout, REL } from './engine.js';
 import { SYMBOLS, makePen, cloudPaths } from './library.jsx';
 import { cloudIcon } from './cloud.js';
 
@@ -61,8 +61,32 @@ function renderCloud(n, ctx) {
   return <g key={n.id} data-k="node" data-id={n.id}>{k}</g>;
 }
 
+// A UML class box: an optional stereotype and the name, then the attributes, then the operations.
+function renderClass(n, ctx) {
+  const { t, L } = ctx, c = classLayout(n, L, ctx.caps), { x, y, w, h } = n;
+  const fill = n.fill === 'tint' ? t.tint : n.fill === 'hatch' ? 'url(#fp-hatch)' : 'none';
+  const y1 = y + c.head, y2 = y1 + c.attrsH;
+  const k = [
+    <rect key="hit" x={x} y={y} width={Math.max(w, 1)} height={Math.max(h, 1)} fill="transparent" />,
+    <rect key="s" x={x} y={y} width={w} height={h} fill={fill} stroke={t.ink} strokeWidth={1.6} strokeDasharray={n.dashed ? '7 5' : undefined} />,
+    <line key="d1" x1={x} y1={y1} x2={x + w} y2={y1} stroke={t.ink} strokeWidth={1.2} />
+  ];
+  if (!c.hideOps) k.push(<line key="d2" x1={x} y1={y2} x2={x + w} y2={y2} stroke={t.ink} strokeWidth={1.2} />);
+  let ty = y + c.pad;
+  if (c.st) {
+    k.push(<text key="st" x={x + w / 2} y={ty + c.stFs * 0.6} textAnchor="middle" dominantBaseline="central" fill={t.muted} fontFamily={MONO} fontSize={c.stFs}>{c.st}</text>);
+    ty += c.stFs * 1.3;
+  }
+  k.push(<text key="nm" x={x + w / 2} y={ty + c.nameFs * 0.62} textAnchor="middle" dominantBaseline="central" fill={t.ink} fontFamily={L.family} fontWeight={L.weight} fontStyle={n.kind === 'abstract' ? 'italic' : undefined} fontSize={c.nameFs} letterSpacing={L.ls * c.nameFs}>{c.name}</text>);
+  const member = (key, str, yy) => <text key={key} x={x + c.pad * 1.5} y={yy} dominantBaseline="central" fill={t.ink} fontFamily={MONO} fontSize={c.memFs} style={{ whiteSpace: 'pre' }}>{str}</text>;
+  c.a.forEach((str, i) => k.push(member('a' + i, str, y1 + c.pad * 0.75 + c.lh * i + c.lh / 2)));
+  c.o.forEach((str, i) => k.push(member('o' + i, str, y2 + c.pad * 0.75 + c.lh * i + c.lh / 2)));
+  return <g key={n.id} data-k="node" data-id={n.id}>{k}</g>;
+}
+
 export function renderNode(n, ctx) {
   if (n.type === 'cloud') return renderCloud(n, ctx);
+  if (n.type === 'class') return renderClass(n, ctx);
   const sym = SYMBOLS[n.type];
   if (sym) return renderSymbol(n, ctx, sym);
   const { t, L } = ctx;
@@ -114,6 +138,19 @@ export function renderNode(n, ctx) {
       const fs = SIZES[n.size || 's'] * 0.95, str = n.label ? txt(ctx, n.label) : '', font = `${L.weight} ${fs}px ${L.family}`;
       const ic = n.icon ? cloudIcon(n.icon) : null, iw = n.icon ? 24 : 0, th = 26;
       const tw = str || iw ? Math.min(w, (str ? measure(str, font) + str.length * L.ls * fs + 24 : 12) + iw) : 0;
+      if (n.pkg) {
+        // A UML package: a folder tab with the name, on top of the body.
+        const pw = Math.min(w, Math.max(80, tw)), pt = 24;
+        k.push(
+          <path key="hs" d={`M${x} ${y + pt} V${y + hh} H${x + w} V${y + pt} H${x + pw} V${y} H${x} Z`} fill="none" stroke="transparent" strokeWidth={14} pointerEvents="stroke" />,
+          <rect key="tabhit" x={x} y={y} width={pw} height={pt} fill="transparent" />,
+          <path key="s" {...S} d={`M${x} ${y + pt} V${y + hh} H${x + w} V${y + pt} H${x + pw} V${y} H${x} Z`} pointerEvents="none" />,
+          <line key="tl0" x1={x} y1={y + pt} x2={x + pw} y2={y + pt} stroke={t.ink} strokeWidth={1.2} pointerEvents="none" />
+        );
+        if (str) k.push(<text key="tl" x={x + 12} y={y + pt / 2 + 1} dominantBaseline="central" fill={t.ink} fontFamily={L.family} fontWeight={L.weight} fontSize={fs} letterSpacing={L.ls * fs} pointerEvents="none">{str}</text>);
+        if (n.sub) k.push(<text key="ts" x={x + pw + 10} y={y + pt / 2 + 1} dominantBaseline="central" fill={t.muted} fontFamily={MONO} fontSize={11}>{n.sub}</text>);
+        break;
+      }
       k.push(
         <rect key="hs" x={x} y={y} width={w} height={hh} fill="none" stroke="transparent" strokeWidth={14} pointerEvents="stroke" />,
         <rect key="s" {...S} x={x} y={y} width={w} height={hh} pointerEvents="none" />
@@ -179,11 +216,23 @@ export function renderNode(n, ctx) {
 export function renderEdge(e, map, ctx, selected) {
   const { t, L } = ctx, geo = edgeGeom(e, map);
   if (!geo) return null;
-  const c = selected ? t.accent : t.ink;
+  const c = selected ? t.accent : t.ink, rel = REL[e.rel];
   const arrow = (key, p, u) => {
     const Ln = 12, W = 4.2, bx = p.x - u.x * Ln, by = p.y - u.y * Ln;
     return <polygon key={key} points={`${p.x},${p.y} ${bx - u.y * W},${by + u.x * W} ${bx + u.y * W},${by - u.x * W}`} fill={c} pointerEvents="none" />;
   };
+  // UML end markers. `u` points along the line into the shape, so the tip sits on the shape's edge.
+  const at = (p, u, back, side) => `${f1(p.x - u.x * back - u.y * side)},${f1(p.y - u.y * back + u.x * side)}`;
+  const marker = (key, type, p, u) => {
+    if (type === 'open') return <polyline key={key} points={`${at(p, u, 12, 6)} ${at(p, u, 0, 0)} ${at(p, u, 12, -6)}`} fill="none" stroke={c} strokeWidth={1.5} strokeLinejoin="miter" pointerEvents="none" />;
+    if (type === 'triangle') return <polygon key={key} points={`${at(p, u, 0, 0)} ${at(p, u, 15, 8)} ${at(p, u, 15, -8)}`} fill={t.paper} stroke={c} strokeWidth={1.5} pointerEvents="none" />;
+    return <polygon key={key} points={`${at(p, u, 0, 0)} ${at(p, u, 9, 6)} ${at(p, u, 18, 0)} ${at(p, u, 9, -6)}`} fill={type === 'filled-diamond' ? c : t.paper} stroke={c} strokeWidth={1.5} pointerEvents="none" />;
+  };
+  // A multiplicity sits outside the shape, beside the line.
+  const mult = (key, text, p, u) => (
+    <text key={key} x={p.x - u.x * 16 + u.y * 11} y={p.y - u.y * 16 - u.x * 11} textAnchor="middle" dominantBaseline="central" fill={c} fontFamily={MONO} fontSize={11} stroke={t.paper} strokeWidth={3} paintOrder="stroke" pointerEvents="none">{text}</text>
+  );
+  const dashed = rel ? !!rel.dashed : e.dashed;
   let label = null;
   if (e.label) {
     const fs = 13, str = txt(ctx, e.label), tw = measure(str, `${L.weight} ${fs}px ${L.family}`) + str.length * L.ls * fs + 12;
@@ -195,9 +244,13 @@ export function renderEdge(e, map, ctx, selected) {
   return (
     <g key={e.id} data-k="edge" data-id={e.id}>
       <path d={geo.d} fill="none" stroke="transparent" strokeWidth={14} pointerEvents="stroke" />
-      <path d={geo.d} fill="none" stroke={c} strokeWidth={1.5} strokeDasharray={e.dashed ? '7 5' : undefined} strokeLinejoin="miter" pointerEvents="none" />
-      {(e.arrow === 'end' || e.arrow === 'both') && arrow('a2', geo.p2, geo.endDir)}
-      {e.arrow === 'both' && arrow('a1', geo.p1, geo.startDir)}
+      <path d={geo.d} fill="none" stroke={c} strokeWidth={1.5} strokeDasharray={dashed ? '7 5' : undefined} strokeLinejoin="miter" pointerEvents="none" />
+      {!rel && (e.arrow === 'end' || e.arrow === 'both') && arrow('a2', geo.p2, geo.endDir)}
+      {!rel && e.arrow === 'both' && arrow('a1', geo.p1, geo.startDir)}
+      {rel && rel.end && marker('m2', rel.end, geo.p2, geo.endDir)}
+      {rel && rel.start && marker('m1', rel.start, geo.p1, geo.startDir)}
+      {e.m1 && mult('t1', e.m1, geo.p1, geo.startDir)}
+      {e.m2 && mult('t2', e.m2, geo.p2, geo.endDir)}
       {label}
     </g>
   );

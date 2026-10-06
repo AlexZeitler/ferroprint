@@ -18,7 +18,7 @@ const RECENT_MAX = 3;
 const PIN_MAX = 24;
 const PALETTE_TOOLS = new Set(['door']);
 // A tool that places a library shape: a symbol, a cloud icon or a frame.
-const isLibraryTool = id => typeof id === 'string' && (!!SYMBOLS[id] || (id.startsWith('cloud:') && isCloudKey(id.slice(6))) || (id.startsWith('frame:') && !!FRAME[id.slice(6)]));
+const isLibraryTool = id => typeof id === 'string' && (!!SYMBOLS[id] || (id.startsWith('cloud:') && isCloudKey(id.slice(6))) || (id.startsWith('frame:') && !!FRAME[id.slice(6)]) || (id.startsWith('uml:') && !!F.UML[id.slice(4)]));
 // The cloud set that a library tool needs.
 const toolCloud = id => (id.startsWith('cloud:') ? cloudProvider(id.slice(6)) : id.startsWith('frame:') && FRAME[id.slice(6)] ? FRAME[id.slice(6)].p : null);
 const without = (o, key) => { const { [key]: _, ...rest } = o; return rest; };
@@ -51,7 +51,7 @@ export default class Editor extends Component {
     this.drag = null; this.clip = null; this.pasteN = 0;
     this.pointers = new Map();
     this.fontCache = {}; this.fontGen = 0;
-    this.nodeCache = new WeakMap(); this.edgeCache = new WeakMap(); this.cloudGen = 0;
+    this.nodeCache = new WeakMap(); this.edgeCache = new WeakMap(); this.classFit = new WeakMap(); this.cloudGen = 0;
     this.barRef = createRef(); this.fileRef = createRef();
     this.canvasEl = null; this.contentEl = null;
     ['onDown', 'onMove', 'onUp', 'onDbl', 'onWheel', 'onKey', 'onKeyUp', 'onResize', 'setCanvas', 'setContent', 'onFile', 'onBlurWin', 'onStorage', 'onHide', 'onHash'].forEach(k => { this[k] = this[k].bind(this); });
@@ -110,6 +110,7 @@ export default class Editor extends Component {
     const prefs = { snap: st.snap, dims: st.dims, mode: st.mode, clean: st.clean, recent: st.recent, pins: st.pins }, ui = JSON.stringify(prefs);
     if (ui !== this._ui) { this._ui = ui; saveUI(prefs); }
     this.ensureClouds();
+    this.fitClasses();
     if (!this.sheet().view && this.canvasEl && this.canvasEl.getBoundingClientRect().width > 0) this.fit();
     const bar = this.barRef.current;
     if (bar) {
@@ -123,6 +124,19 @@ export default class Editor extends Component {
     nodes.forEach(n => { const p = F.nodeCloud(n); if (p) need.add(p); });
     [...this.state.pins, ...this.state.recent].forEach(id => { const p = toolCloud(id); if (p) need.add(p); });
     return [...need];
+  }
+  // Class boxes grow to fit their text. The fit runs after every change, so each way to edit a class keeps it right.
+  fitClasses() {
+    const s = this.sheet(), L = this.letter(), caps = this.state.doc.settings.caps, key = `${L.css}|${caps}|${this.fontGen}`, fix = {};
+    s.nodes.forEach(n => {
+      if (n.type !== 'class') return;
+      const c = this.classFit.get(n);
+      if (c === key) return;
+      this.classFit.set(n, key);
+      const lay = F.classLayout(n, L, caps), w = Math.max(n.w, lay.minW);
+      if (w !== n.w || lay.h !== n.h) fix[n.id] = { w, h: lay.h };
+    });
+    if (Object.keys(fix).length) this.setNodes(ns => ns.map(n => (fix[n.id] ? { ...n, ...fix[n.id] } : n)));
   }
   ensureClouds() {
     this.cloudsInUse(this.sheet().nodes).forEach(p => { if (!cloudSet(p) && !cloudFailed(p)) loadCloud(p).catch(() => {}); });
@@ -593,6 +607,12 @@ export default class Editor extends Component {
     const kind = tg ? tg.getAttribute('data-k') : null, id = tg ? tg.getAttribute('data-id') : null;
     if ((kind === 'node' || kind === 'handle') && id) {
       const n = this.sheet().nodes.find(q => q.id === id);
+      if (n && n.type === 'class') {
+        // A double-click edits the compartment under the pointer: the name, the attributes or the operations.
+        const p = this.toWorld(clientX, clientY), lay = F.classLayout(n, this.letter(), this.state.doc.settings.caps), y1 = n.y + lay.head;
+        this.startEdit('node', id, p.y < y1 ? 'label' : p.y < y1 + lay.attrsH || lay.hideOps ? 'attrs' : 'ops');
+        return;
+      }
       if (n && !F.LABELLESS[n.type]) this.startEdit('node', id);
       return;
     }
@@ -619,9 +639,9 @@ export default class Editor extends Component {
   }
 
   // ---------- label editing
-  startEdit(kind, id) {
+  startEdit(kind, id, field = 'label') {
     const s = this.sheet(), it = (kind === 'node' ? s.nodes : s.edges).find(q => q.id === id);
-    if (it) this.setState({ editing: { kind, id, value: it.label || '' }, sel: [id] });
+    if (it) this.setState({ editing: { kind, id, field, value: it[field] || '' }, sel: [id] });
   }
   commitEdit() {
     const ed = this.state.editing;
@@ -633,8 +653,9 @@ export default class Editor extends Component {
       const n = s.nodes.find(q => q.id === ed.id);
       if (!n) return;
       // An empty text label has no purpose, so it is removed.
+      const field = ed.field || 'label';
       if (n.type === 'text' && !ed.value.trim()) { this.setNodes(a => a.filter(q => q.id !== n.id)); this.setState({ sel: [] }); return; }
-      if (n.label !== ed.value) { this.pushHistory(); this.setNodes(a => a.map(q => (q.id === n.id ? { ...q, label: ed.value } : q))); }
+      if ((n[field] || '') !== ed.value) { this.pushHistory(); this.setNodes(a => a.map(q => (q.id === n.id ? { ...q, [field]: ed.value } : q))); }
     } else {
       const x = s.edges.find(q => q.id === ed.id);
       if (x && x.label !== ed.value) { this.pushHistory(); this.setEdges(a => a.map(q => (q.id === x.id ? { ...q, label: ed.value } : q))); }
@@ -1086,7 +1107,8 @@ export default class Editor extends Component {
       if (single.type === 'line') {
         F.linePts(single).forEach((q, i) => out.push(<rect key={'p' + i} x={q.x - hs / 2} y={q.y - hs / 2} width={hs} height={hs} fill={t.paper} stroke={A} strokeWidth={1.4 / k} data-k="handle" data-id={single.id} data-h={'p' + i} style={{ cursor: 'move' }} />));
       } else {
-        Object.keys(F.HANDLES).forEach(key => {
+        // A class box sets its own height, so it has width handles only.
+        Object.keys(F.HANDLES).filter(key => single.type !== 'class' || key === 'e' || key === 'w').forEach(key => {
           const [fx, fy] = F.HANDLES[key];
           out.push(<rect key={'h' + key} x={single.x + single.w * fx - hs / 2} y={single.y + single.h * fy - hs / 2} width={hs} height={hs} fill={t.paper} stroke={A} strokeWidth={1.4 / k} data-k="handle" data-id={single.id} data-h={key} style={{ cursor: F.HCUR[key] }} />);
         });
@@ -1145,10 +1167,44 @@ export default class Editor extends Component {
     const ed = this.state.editing;
     if (!ed) return null;
     const { t, L } = ctx, v = this.view(), k = v.k;
-    let box, align = 'center', fs = 16;
+    let box, align = 'center', fs = 16, member = null;
     if (ed.kind === 'node') {
       const n = s.nodes.find(q => q.id === ed.id);
       if (!n) return null;
+      if (n.type === 'class') {
+        const lay = F.classLayout(n, L, ctx.caps), f = ed.field || 'label';
+        if (f === 'label') { box = { x: n.x, y: n.y + (lay.st ? lay.stFs * 1.3 : 0), w: n.w, h: lay.head - (lay.st ? lay.stFs * 1.3 : 0) }; fs = lay.nameFs; }
+        else {
+          // The members of a class: one per line, in the monospace font. Enter adds a line.
+          const top = n.y + lay.head + (f === 'ops' ? lay.attrsH : 0), count = Math.max(1, String(ed.value).split('\n').length);
+          box = { x: n.x, y: top, w: Math.max(n.w, 180), h: Math.max(f === 'ops' ? lay.opsH : lay.attrsH, count * lay.lh + lay.pad * 1.5) };
+          member = lay;
+        }
+      }
+    }
+    if (member) {
+      const left = v.x + box.x * k, top = v.y + box.y * k;
+      return (
+        <textarea
+          key="ed" autoFocus value={ed.value} spellCheck={false} aria-label={ed.field === 'ops' ? 'Operations' : 'Attributes'}
+          placeholder={ed.field === 'ops' ? '+ method(): Type' : '- field: Type'}
+          onChange={ev => this.setState({ editing: { ...this.state.editing, value: ev.target.value } })}
+          onKeyDown={ev => {
+            if (ev.key === 'Escape') { ev.preventDefault(); this.cancelEdit(); }
+            else if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); this.commitEdit(); }
+          }}
+          onBlur={() => this.commitEdit()}
+          onPointerDown={ev => ev.stopPropagation()}
+          onDoubleClick={ev => ev.stopPropagation()}
+          className="label-editor"
+          style={{ left, top, width: box.w * k, height: box.h * k, padding: `${member.pad * 0.75 * k}px ${member.pad * 1.5 * k}px 0`, background: t.paper, color: t.ink, border: `1.5px solid ${t.accent}`, textAlign: 'left', fontFamily: F.MONO, fontSize: member.memFs * k, lineHeight: `${member.lh * k}px`, whiteSpace: 'pre', overflow: 'auto' }}
+        />
+      );
+    }
+    if (box) {
+      // A class name: the box is set above.
+    } else if (ed.kind === 'node') {
+      const n = s.nodes.find(q => q.id === ed.id);
       fs = F.SIZES[n.size || 'm'] * (n.type === 'note' ? 0.9 : n.type === 'zone' ? 0.95 : 1);
       if (n.type === 'actor') box = { x: n.x + n.w / 2 - 90, y: n.y + n.h + 2, w: 180, h: 44 };
       else if (n.type === 'zone') { box = { x: n.x + (n.icon ? 24 : 0), y: n.y, w: Math.max(220, Math.min(n.w, 320)), h: 30 }; align = 'left'; }

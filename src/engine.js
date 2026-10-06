@@ -30,7 +30,7 @@ const BASE_SHAPES = {
 // Every shape a tool can place: the palette shapes and the library symbols.
 export const SHAPES = { ...BASE_SHAPES, ...Object.fromEntries(Object.values(SYMBOLS).map(s => [s.id, { name: s.name, w: s.w, h: s.h, label: s.label }])) };
 const symbolSet = test => Object.fromEntries(Object.values(SYMBOLS).filter(test).map(s => [s.id, 1]));
-export const TYPE_NAME = { path: 'Freehand', line: 'Line', cloud: 'Cloud icon', ...Object.fromEntries(Object.entries(SHAPES).map(([k, v]) => [k, v.name])) };
+export const TYPE_NAME = { path: 'Freehand', line: 'Line', cloud: 'Cloud icon', class: 'Class', ...Object.fromEntries(Object.entries(SHAPES).map(([k, v]) => [k, v.name])) };
 export const TOOL_NAMES = { select: 'Select', hand: 'Pan', connector: 'Connector', pen: 'Pen', line: 'Line / wall', ...Object.fromEntries(Object.entries(SHAPES).map(([k, v]) => [k, v.name])) };
 export const KEYS = { v: 'select', h: 'hand', c: 'connector', p: 'pen', l: 'line', b: 'box', r: 'service', d: 'database', q: 'queue', u: 'actor', g: 'zone', k: 'decision', e: 'terminal', w: 'window', o: 'button', i: 'input', m: 'image', n: 'note', t: 'text' };
 export const KEY_OF = Object.fromEntries(Object.entries(KEYS).map(([k, v]) => [v, k.toUpperCase()]));
@@ -55,6 +55,11 @@ const BELOW = { actor: 1, cloud: 1, ...symbolSet(s => s.below) };
 export const CLOUD_SIZE = 48;
 export function toolShape(tool) {
   if (SHAPES[tool]) return { type: tool, ...SHAPES[tool] };
+  if (typeof tool === 'string' && tool.startsWith('uml:') && UML[tool.slice(4)]) {
+    const u = UML[tool.slice(4)];
+    if (u.pkg) return { type: 'zone', name: u.name, w: 480, h: 320, label: u.label, dashed: false, pkg: true };
+    return { type: 'class', name: u.name, w: 200, h: 120, label: u.label, kind: tool.slice(4), attrs: u.attrs, ops: u.ops };
+  }
   if (typeof tool === 'string' && tool.startsWith('frame:') && FRAME[tool.slice(6)]) {
     const f = FRAME[tool.slice(6)];
     return { type: 'zone', name: `${PROVIDER_NAME[f.p]} ${f.name}`, w: f.w, h: f.h, label: f.name, icon: f.icon, dashed: !f.solid };
@@ -67,6 +72,8 @@ export function toolShape(tool) {
 }
 export const toolName = tool => (TOOL_NAMES[tool] || (toolShape(tool) || {}).name || tool);
 export function nodeTitle(n) {
+  if (n.type === 'class') return (UML[n.kind] || UML.class).name;
+  if (n.type === 'zone' && n.pkg) return 'Package';
   if (n.type !== 'cloud') return TYPE_NAME[n.type] || n.type;
   const ic = cloudIcon(n.icon);
   return ic ? cloudLabel(ic) : 'Cloud icon';
@@ -282,6 +289,44 @@ function finish(pieces, p1, p2, d, endDir, startDir) {
 // Moves the bends of a connector, for example when both of its shapes move.
 export const shiftPts = (pts, dx, dy) => (pts && pts.length ? pts.map(q => ({ x: q.x + dx, y: q.y + dy })) : pts);
 
+// ---------- class diagrams
+// A class box: the name, then the attributes, then the operations. The members are one per line.
+export const UML = {
+  class: { name: 'Class', label: 'Order', attrs: '- id: UUID\n- total: Money', ops: '+ place(): void\n+ cancel(): void' },
+  abstract: { name: 'Abstract class', label: 'Shape', attrs: '# name: String', ops: '+ area(): Double' },
+  interface: { name: 'Interface', label: 'Repository', attrs: '', ops: '+ find(id: UUID): T\n+ save(item: T): void' },
+  enum: { name: 'Enum', label: 'Status', attrs: 'PENDING\nPAID\nSHIPPED', ops: '' },
+  package: { name: 'Package', label: 'domain', pkg: true }
+};
+export const STEREOTYPE = { abstract: '«abstract»', interface: '«interface»', enum: '«enumeration»' };
+// UML relations. Each one sets the line style and the end markers of a connector.
+export const RELS = ['none', 'assoc', 'inherit', 'realize', 'depend', 'aggregate', 'compose'];
+export const REL = {
+  assoc: { name: 'Association', end: 'open' },
+  inherit: { name: 'Inheritance', end: 'triangle' },
+  realize: { name: 'Realization', end: 'triangle', dashed: true },
+  depend: { name: 'Dependency', end: 'open', dashed: true },
+  aggregate: { name: 'Aggregation', start: 'diamond' },
+  compose: { name: 'Composition', start: 'filled-diamond' }
+};
+const lines = t => (t ? String(t).split('\n') : []);
+// The size and the compartments of a class box. A box grows to fit its text, and it can be wider.
+export function classLayout(n, L, caps) {
+  const k = SIZES[n.size || 'm'] / 16, nameFs = 16 * k, memFs = 12 * k, stFs = 11 * k, lh = 16 * k, pad = 8 * k;
+  const st = STEREOTYPE[n.kind], name = caps ? String(n.label || '').toUpperCase() : String(n.label || '');
+  const a = lines(n.attrs), o = lines(n.ops), hideOps = n.kind === 'enum' && !o.length;
+  const head = pad + (st ? stFs * 1.3 : 0) + nameFs * 1.25 + pad * 0.75;
+  const attrsH = Math.max(a.length * lh, 6 * k) + pad * 1.5;
+  const opsH = hideOps ? 0 : Math.max(o.length * lh, 6 * k) + pad * 1.5;
+  const memFont = `400 ${memFs}px ${MONO}`, nameFont = `${n.kind === 'abstract' ? 'italic ' : ''}${L.weight} ${nameFs}px ${L.family}`;
+  const widest = Math.max(
+    measure(name, nameFont) + name.length * L.ls * nameFs,
+    st ? measure(st, `400 ${stFs}px ${MONO}`) : 0,
+    ...a.map(t => measure(t, memFont)), ...o.map(t => measure(t, memFont))
+  );
+  return { k, nameFs, memFs, stFs, lh, pad, st, name, a, o, hideOps, head, attrsH, opsH, nameFont, memFont, minW: Math.ceil(widest + pad * 3), h: Math.ceil(head + attrsH + opsH) };
+}
+
 // ---------- units: one grid square is 1 ft or 0.5 m on a scaled sheet
 export function fmtLen(px, u, g) {
   if (u === 'px') return String(Math.round(px));
@@ -326,6 +371,8 @@ export function newNode(tool, r) {
   if (TURN[type]) n.rot = 0;
   if (sh.icon) n.icon = sh.icon;
   if (sh.dashed != null) n.dashed = sh.dashed;
+  if (sh.pkg) n.pkg = true;
+  if (type === 'class') Object.assign(n, { kind: sh.kind, attrs: sh.attrs, ops: sh.ops });
   return n;
 }
 export function newSheet(number) {
@@ -423,7 +470,7 @@ const oneOf = (v, list, d) => (list.includes(v) ? v : d);
 function cleanNode(n, ids) {
   if (!n || typeof n !== 'object') return null;
   const type = n.type;
-  if (!SHAPES[type] && type !== 'path' && type !== 'line' && type !== 'cloud') return null;
+  if (!SHAPES[type] && type !== 'path' && type !== 'line' && type !== 'cloud' && type !== 'class') return null;
   if (type === 'cloud' && !isCloudKey(n.icon)) return null;
   if (![n.x, n.y, n.w, n.h].every(num)) return null;
   let id = str(n.id);
@@ -438,6 +485,8 @@ function cleanNode(n, ids) {
   };
   if (TURN[type]) out.rot = oneOf(n.rot, [0, 90, 180, 270], 0);
   if ((type === 'cloud' || type === 'zone') && isCloudKey(n.icon)) out.icon = n.icon;
+  if (type === 'zone' && n.pkg === true) out.pkg = true;
+  if (type === 'class') Object.assign(out, { kind: oneOf(n.kind, Object.keys(UML).filter(k => !UML[k].pkg), 'class'), attrs: str(n.attrs).slice(0, 5000), ops: str(n.ops).slice(0, 5000) });
   if (typeof n.group === 'string' && /^[a-z0-9]{1,16}$/.test(n.group)) out.group = n.group;
   if (n.locked === true) out.locked = true;
   if (type === 'path' || type === 'line') {
@@ -461,6 +510,10 @@ function cleanEdge(e, nodeIds, ids) {
   if (SIDES.includes(e.toSide) && e.toSide !== 'auto') out.toSide = e.toSide;
   const pts = Array.isArray(e.pts) ? e.pts.filter(q => q && num(q.x) && num(q.y)).slice(0, 40).map(q => ({ x: q.x, y: q.y })) : [];
   if (pts.length) out.pts = pts;
+  if (RELS.includes(e.rel) && e.rel !== 'none') out.rel = e.rel;
+  const m1 = str(e.m1).slice(0, 24), m2 = str(e.m2).slice(0, 24);
+  if (m1) out.m1 = m1;
+  if (m2) out.m2 = m2;
   return out;
 }
 export function cleanSheet(s, sheetIds, fallbackNumber) {

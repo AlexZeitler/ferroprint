@@ -9,6 +9,7 @@ const frame = (id, fid, x, y, w, h, label, sub) => {
   return node(id, 'zone', x, y, w, h, label || f.name, sub, { icon: f.icon || undefined, dashed: !f.solid, size: 's' });
 };
 const edge = (id, from, to, label, extra) => ({ id, from, to, label: label || '', route: 'elbow', arrow: 'end', dashed: false, ...extra });
+const cls = (id, kind, x, y, w, label, attrs, ops) => node(id, 'class', x, y, w, 100, label, '', { kind, attrs, ops });
 const example = n => () => { const s = exampleDoc().sheets[n]; return { name: s.name, unit: s.unit, nodes: s.nodes, edges: s.edges }; };
 
 export const TEMPLATES = [
@@ -113,6 +114,37 @@ export const TEMPLATES = [
         edge('e1', 'users', 'cdn'), edge('e2', 'cdn', 'slb'), edge('e3', 'cdn', 'oss', 'static', { dashed: true }),
         edge('e4', 'slb', 'ecsa'), edge('e5', 'slb', 'ecsb'), edge('e6', 'ecsa', 'db'), edge('e7', 'ecsb', 'db'),
         edge('e8', 'ecsa', 'cache', '', { dashed: true }), edge('e9', 'ecsb', 'cache', '', { dashed: true })
+      ]
+    })
+  },
+  {
+    id: 'class-diagram', name: 'Class diagram', clouds: [],
+    desc: 'An online shop domain with classes, an interface, an enum, an abstract class and each UML relation.',
+    sheet: () => ({
+      name: 'Shop domain classes', unit: 'px',
+      nodes: [
+        node('pkg', 'zone', 0, 0, 1040, 900, 'shop.domain', '', { pkg: true, size: 's' }),
+        cls('customer', 'class', 40, 60, 240, 'Customer', '- id: UUID\n- name: String\n- email: Email', '+ placeOrder(cart: Cart): Order'),
+        cls('order', 'class', 380, 60, 240, 'Order', '- id: UUID\n- placedAt: Instant\n- status: OrderStatus', '+ total(): Money\n+ cancel(): void'),
+        cls('status', 'enum', 740, 60, 200, 'OrderStatus', 'PENDING\nPAID\nSHIPPED\nCANCELLED', ''),
+        cls('pay', 'interface', 40, 330, 260, 'PaymentMethod', '', '+ authorize(amount: Money): Receipt'),
+        cls('line', 'class', 380, 330, 240, 'OrderLine', '- quantity: Int\n- price: Money', '+ subtotal(): Money'),
+        cls('product', 'class', 740, 330, 200, 'Product', '- sku: String\n- name: String\n- price: Money', ''),
+        cls('card', 'class', 20, 560, 280, 'Card', '- last4: String', '+ authorize(amount: Money): Receipt'),
+        cls('wallet', 'class', 330, 560, 280, 'Wallet', '- provider: String', '+ authorize(amount: Money): Receipt'),
+        cls('discount', 'abstract', 740, 560, 240, 'Discount', '- code: String', '+ apply(order: Order): Money'),
+        cls('percent', 'class', 740, 760, 240, 'PercentOff', '- percent: Int', '+ apply(order: Order): Money')
+      ],
+      edges: [
+        edge('r1', 'customer', 'order', 'places', { rel: 'assoc', m1: '1', m2: '0..*' }),
+        edge('r2', 'order', 'line', '', { rel: 'compose', m1: '1', m2: '1..*' }),
+        edge('r3', 'line', 'product', '', { rel: 'assoc', m1: '0..*', m2: '1' }),
+        edge('r4', 'order', 'status', '', { rel: 'depend' }),
+        edge('r5', 'order', 'pay', 'paid with', { rel: 'assoc', m2: '1' }),
+        edge('r6', 'card', 'pay', '', { rel: 'realize' }),
+        edge('r7', 'wallet', 'pay', '', { rel: 'realize' }),
+        edge('r8', 'order', 'discount', '', { rel: 'aggregate', m2: '0..*', fromSide: 'right', toSide: 'top', pts: [{ x: 680, y: 129 }, { x: 680, y: 520 }] }),
+        edge('r9', 'percent', 'discount', '', { rel: 'inherit' })
       ]
     })
   },

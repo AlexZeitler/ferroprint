@@ -721,6 +721,35 @@ textarea:focus-visible {
 }
 .numfield input:disabled { color: var(--muted); }
 
+/* ---------- class diagrams */
+.panel textarea.code {
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre;
+  overflow-x: auto;
+}
+.rel-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 2px;
+}
+.rel {
+  --tile-bg: var(--panel);
+  height: 28px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+}
+.rel svg { width: 26px; }
+.rel:hover { border-color: var(--ink); }
+.rel.on { --tile-bg: var(--ink); background: var(--ink); color: var(--paper); border-color: var(--ink); }
+
 /* ---------- title block */
 .title-block {
   position: absolute;

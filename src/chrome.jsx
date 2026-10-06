@@ -1,6 +1,6 @@
 // Editor chrome: the sheet frame, toolbars, inspector, panels, title block and status bar.
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
-import { TYPE_NAME, TOOL_NAMES, KEY_OF, LABELLESS, NOFILL, NOLINE, TURN, trunc, toolName, nodeTitle, nodeMeta, bounds } from './engine.js';
+import { TYPE_NAME, TOOL_NAMES, KEY_OF, LABELLESS, NOFILL, NOLINE, TURN, trunc, toolName, nodeTitle, nodeMeta, bounds, UML, REL, RELS, classLayout } from './engine.js';
 import { renderNode, renderEdge } from './draw.jsx';
 import { TEMPLATES } from './templates.js';
 import { ICONS, PALETTE, LIBRARY_ICON, PIN_ICON } from './icons.jsx';
@@ -185,6 +185,8 @@ export function Palette({ tool, onTool, recent, pins, onUnpin, theme, libraryOpe
 }
 
 const CLOUD_SEARCH_MAX = 48;
+// Class diagram shapes sit with the library symbols in the panel.
+const GROUPS = [...CATEGORIES, { id: 'uml', name: 'Class diagram', items: Object.keys(UML).map(k => ({ id: `uml:${k}`, name: UML[k].name, keys: 'uml class diagram interface enum abstract package object oriented type model' })) }];
 let lastView = 'all';
 
 // One list of shapes for the panel. Each item is a tool id and a name.
@@ -198,7 +200,7 @@ function librarySections(view, q, pins) {
   };
   const ranked = list => list.map((it, i) => ({ ...it, i })).filter(it => it.s > 0).sort((a, b) => b.s - a.s || a.i - b.i);
   if (view === 'pinned') return [{ key: 'pinned', title: 'Pinned', items: ranked(pins.map(id => ({ id, name: toolName(id), s: score(toolName(id)) }))) }];
-  const base = CATEGORIES.filter(c => view === 'all' || c.id === view).map(c => ({
+  const base = GROUPS.filter(c => view === 'all' || c.id === view).map(c => ({
     key: c.id, title: c.name, items: ranked(c.items.map(sym => ({ id: sym.id, name: sym.name, s: score(sym.name, sym.keys || '', c.name) })))
   }));
   const cloud = PROVIDERS.filter(p => view === p.id || (view === 'all' && q.length >= 2)).flatMap(p => {
@@ -239,7 +241,7 @@ export const LibraryPanel = memo(function LibraryPanel({ tool, theme, pins, onPi
     if (e.key === 'Escape') { e.stopPropagation(); if (query) setQuery(''); else onClose(); }
     else if (e.key === 'Enter' && first) { e.preventDefault(); onPick(first.id); }
   };
-  const nav = [['pinned', 'Pinned', pins.length], ['all', 'All'], ...CATEGORIES.map(c => [c.id, c.name, c.items.length])];
+  const nav = [['pinned', 'Pinned', pins.length], ['all', 'All'], ...GROUPS.map(c => [c.id, c.name, c.items.length])];
   const navBtn = ([id, name, count]) => (
     <button type="button" key={id} className={cx(view === id && 'on')} aria-pressed={view === id} onClick={() => setView(id)}>
       <span>{name}</span>{count != null && <span className="count">{count}</span>}
@@ -306,6 +308,21 @@ export const LibraryPanel = memo(function LibraryPanel({ tool, theme, pins, onPi
 
 const SOLID = [[false, 'Solid'], [true, 'Dashed']];
 
+// A small line with the end markers of a UML relation.
+function RelIcon({ r }) {
+  const rel = REL[r], hollow = { fill: 'var(--tile-bg)' };
+  return (
+    <svg width="30" height="14" viewBox="0 0 30 14" aria-hidden="true" style={{ fill: 'none', stroke: 'currentColor', strokeWidth: 1.2 }}>
+      <path d="M2 7 H28" strokeDasharray={rel && rel.dashed ? '3 2' : undefined} />
+      {!rel && <path d="M28 7 L22.5 4.3 V9.7 Z" fill="currentColor" stroke="none" />}
+      {rel && rel.end === 'open' && <path d="M22.5 3.5 L28 7 L22.5 10.5" />}
+      {rel && rel.end === 'triangle' && <path d="M28 7 L21 3 V11 Z" style={hollow} />}
+      {rel && rel.start === 'diamond' && <path d="M2 7 L7 3.8 L12 7 L7 10.2 Z" style={hollow} />}
+      {rel && rel.start === 'filled-diamond' && <path d="M2 7 L7 3.8 L12 7 L7 10.2 Z" fill="currentColor" />}
+    </svg>
+  );
+}
+
 const SIDE_OPTS = [['auto', 'Auto'], ['top', '↑'], ['right', '→'], ['bottom', '↓'], ['left', '←']];
 
 // Action buttons in two columns. An odd last button takes the full row.
@@ -329,10 +346,24 @@ export function Inspector({ nodes, edges, nodeById, fmt, setNode, setEdge, act }
         <header><h2 title={nodeTitle(n)}>{nodeTitle(n)}</h2><span>{nodeMeta(n) || `${fmt(n.w)} × ${fmt(n.h)}`}</span></header>
         {!LABELLESS[n.type] && (
           <section>
-            <div className="caption">LABEL</div>
-            <textarea rows={2} value={n.label} onChange={e => set({ label: e.target.value }, 'label' + id)} />
-            <div className="caption">DETAIL</div>
-            <input className="field mono" value={n.sub} placeholder={n.type === 'room' ? 'Area is shown automatically' : 'e.g. Postgres 16'} onChange={e => set({ sub: e.target.value }, 'sub' + id)} />
+            <div className="caption">{n.type === 'class' ? 'NAME' : 'LABEL'}</div>
+            <textarea rows={n.type === 'class' ? 1 : 2} value={n.label} onChange={e => set({ label: e.target.value }, 'label' + id)} />
+            {n.type !== 'class' && <div className="caption">DETAIL</div>}
+            {n.type !== 'class' && <input className="field mono" value={n.sub} placeholder={n.type === 'room' ? 'Area is shown automatically' : 'e.g. Postgres 16'} onChange={e => set({ sub: e.target.value }, 'sub' + id)} />}
+          </section>
+        )}
+        {n.type === 'class' && (
+          <section>
+            <div className="caption">KIND</div>
+            <div className="seg" role="group" aria-label="KIND">
+              {[['class', 'Class'], ['abstract', 'Abstract'], ['interface', 'Interface'], ['enum', 'Enum']].map(([v, l]) => (
+                <button type="button" key={v} className={cx(n.kind === v && 'on')} aria-pressed={n.kind === v} onClick={() => set({ kind: v })}>{l}</button>
+              ))}
+            </div>
+            <div className="caption">{n.kind === 'enum' ? 'VALUES' : 'ATTRIBUTES'} · ONE PER LINE</div>
+            <textarea className="code" rows={Math.min(8, Math.max(2, (n.attrs || '').split('\n').length))} value={n.attrs || ''} spellCheck={false} placeholder={n.kind === 'enum' ? 'VALUE' : '- name: Type'} onChange={e => set({ attrs: e.target.value }, 'attrs' + id)} />
+            <div className="caption">OPERATIONS · ONE PER LINE</div>
+            <textarea className="code" rows={Math.min(8, Math.max(2, (n.ops || '').split('\n').length))} value={n.ops || ''} spellCheck={false} placeholder="+ method(arg: Type): Type" onChange={e => set({ ops: e.target.value }, 'ops' + id)} />
           </section>
         )}
         <section>
@@ -376,11 +407,29 @@ export function Inspector({ nodes, edges, nodeById, fmt, setNode, setEdge, act }
         <section>
           <div className="from-to">{nm(nodeById[e.from])} → {nm(nodeById[e.to])}</div>
           <Seg label="ROUTE" opts={[['elbow', 'Elbow'], ['straight', 'Straight'], ['curve', 'Curve']]} value={e.route} onChange={v => set({ route: v })} />
-          <Seg label="ARROW" opts={[['none', 'None'], ['end', 'End'], ['both', 'Both']]} value={e.arrow} onChange={v => set({ arrow: v })} />
-          <Seg label="LINE" opts={SOLID} value={!!e.dashed} onChange={v => set({ dashed: v })} />
+          {!e.rel && <Seg label="ARROW" opts={[['none', 'None'], ['end', 'End'], ['both', 'Both']]} value={e.arrow} onChange={v => set({ arrow: v })} />}
+          {!e.rel && <Seg label="LINE" opts={SOLID} value={!!e.dashed} onChange={v => set({ dashed: v })} />}
           <Seg label="FROM" opts={SIDE_OPTS} value={e.fromSide || 'auto'} onChange={v => act.sides({ fromSide: v })} />
           <Seg label="TO" opts={SIDE_OPTS} value={e.toSide || 'auto'} onChange={v => act.sides({ toSide: v })} />
           <p className="hint tight">Drag the round handle on the line to add a bend. Double-click a square bend to remove it.</p>
+        </section>
+        <section>
+          <div className="caption">UML RELATION · {e.rel ? REL[e.rel].name.toUpperCase() : 'NONE'}</div>
+          <div className="rel-grid" role="group" aria-label="UML relation">
+            {RELS.map(r => {
+              const on = (e.rel || 'none') === r;
+              return (
+                <button type="button" key={r} className={cx('rel', on && 'on')} aria-pressed={on} aria-label={r === 'none' ? 'No relation' : REL[r].name} title={r === 'none' ? 'A plain connector' : REL[r].name} onClick={() => set({ rel: r === 'none' ? undefined : r })}>
+                  <RelIcon r={r} />
+                </button>
+              );
+            })}
+          </div>
+          <div className="caption">MULTIPLICITY</div>
+          <div className="geom">
+            <label className="numfield"><span>FROM</span><input value={e.m1 || ''} placeholder="1" spellCheck={false} onChange={ev => set({ m1: ev.target.value }, 'm1' + id)} /></label>
+            <label className="numfield"><span>TO</span><input value={e.m2 || ''} placeholder="0..*" spellCheck={false} onChange={ev => set({ m2: ev.target.value }, 'm2' + id)} /></label>
+          </div>
         </section>
         <Acts list={[
           ['REVERSE DIRECTION', act.reverse, { wide: true }],
@@ -465,7 +514,9 @@ export function SetupPanel({ settings, onSet, onClose }) {
 }
 
 // A small drawing of a template sheet. Cloud icons appear when their set has loaded.
-function TemplatePreview({ sheet, ctx }) {
+function TemplatePreview({ sheet: raw, ctx }) {
+  // Class boxes fit their text here too, as they do on the sheet.
+  const sheet = { ...raw, nodes: raw.nodes.map(n => (n.type === 'class' ? (lay => ({ ...n, w: Math.max(n.w, lay.minW), h: lay.h }))(classLayout(n, ctx.L, ctx.caps)) : n)) };
   const b = bounds(sheet.nodes) || { x: 0, y: 0, w: 100, h: 60 }, pad = 30;
   const map = Object.fromEntries(sheet.nodes.map(n => [n.id, n]));
   const c = { ...ctx, unit: sheet.unit };
